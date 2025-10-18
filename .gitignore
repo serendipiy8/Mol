@@ -1,0 +1,12 @@
+Model/experiments/outputs/docking_from_lmdb/temp_mols/lig_00000.sdf
+Model/experiments/outputs/docking_from_lmdb/temp_mols/lig_00001.sdf
+Model/experiments/outputs/docking_from_lmdb/temp_mols/lig_00002.sdf
+Model/experiments/outputs/docking_from_lmdb/temp_mols/rec_00000.pdb
+Model/experiments/outputs/docking_from_lmdb/temp_mols/rec_00000.pdbqt
+Model/experiments/outputs/docking_from_lmdb/temp_mols/rec_00001.pdb
+Model/experiments/outputs/docking_from_lmdb/temp_mols/rec_00001.pdbqt
+Model/experiments/outputs/docking_from_lmdb/temp_mols/rec_00002.pdb
+Model/experiments/outputs/docking_from_lmdb/temp_mols/rec_00002.pdbqt
+Model/src/data/crossdocked_v1.1_rmsd1.0_processed/crossdocked_v1.1_rmsd1.0_processed_full_ref_prior_aromatic.lmdb
+Model/src/data/split_by_name.pt
+Model/src/data/crossdocked_v1.1_rmsd1.0_processed/crossdocked_v1.1_rmsd1.0_processed_full_ref_prior_aromatic_name2id.pt
