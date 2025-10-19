@@ -8,44 +8,39 @@ from .utils import ProteinLigandData
 
 
 class CrossDockedDataset:
-    """CrossDocked数据集类"""
     
     def __init__(self, root: str, split: Optional[str] = None):
         """
-        初始化CrossDocked数据集
-        
-        Args:
-            root: 数据集根目录
-            split: 数据集分割 ('train', 'test', None)
+        Initialize CrossDocked dataset
         """
         self.root = os.path.abspath(root)
         self.split = split
         
-        # 确定processed目录路径
+        # Determine processed directory path
         self.processed_dir = os.path.join(os.path.dirname(self.root), 'crossdocked_v1.1_rmsd1.0_processed')
         self.processed_dir = os.path.abspath(self.processed_dir)
         
-        # 查找LMDB和name2id文件
+        # Find LMDB and name2id files
         self.lmdb_path, self.name2id_path = self._find_lmdb_and_name2id_files()
         
-        # 初始化数据库连接
+        # Initialize database connection
         self.db = None
         self.keys = []
         self.name2id = {}
         
-        # 加载数据
+        # Load data
         self._load_name2id()
         self._connect_db()
         
-        # 加载分割信息
+        # Load split information
         self.train_indices = []
         self.test_indices = []
         self._load_split()
     
     def _find_lmdb_and_name2id_files(self) -> Tuple[str, str]:
-        """查找LMDB和name2id文件"""
+        """Find LMDB and name2id files"""
         
-        # 可能的文件名模式
+        # Possible filename patterns
         lmdb_patterns = [
             'crossdocked_v1.1_rmsd1.0_processed_full_ref_prior_aromatic.lmdb',
             'crossdocked_v1.1_rmsd1.0_processed_full_ref_prior_aromatic.lmdb-lock',
@@ -61,7 +56,7 @@ class CrossDockedDataset:
         lmdb_path = None
         name2id_path = None
         
-        # 查找LMDB文件
+        # Find LMDB file
         for pattern in lmdb_patterns:
             if '*' not in pattern:
                 full_path = os.path.join(self.processed_dir, pattern)
@@ -69,14 +64,14 @@ class CrossDockedDataset:
                     lmdb_path = os.path.abspath(full_path)
                     break
             else:
-                # 使用glob查找
+                # Use glob to find
                 import glob
                 matches = glob.glob(os.path.join(self.processed_dir, pattern))
                 if matches:
                     lmdb_path = os.path.abspath(matches[0])
                     break
         
-        # 查找name2id文件
+        # Find name2id file
         for pattern in name2id_patterns:
             if '*' not in pattern:
                 full_path = os.path.join(self.processed_dir, pattern)
@@ -84,7 +79,7 @@ class CrossDockedDataset:
                     name2id_path = os.path.abspath(full_path)
                     break
             else:
-                # 使用glob查找
+                # Use glob to find
                 import glob
                 matches = glob.glob(os.path.join(self.processed_dir, pattern))
                 if matches:
@@ -92,14 +87,14 @@ class CrossDockedDataset:
                     break
         
         if lmdb_path is None:
-            raise FileNotFoundError(f"找不到LMDB文件在: {self.processed_dir}")
+            raise FileNotFoundError(f"LMDB file not found in: {self.processed_dir}")
         if name2id_path is None:
-            raise FileNotFoundError(f"找不到name2id文件在: {self.processed_dir}")
+            raise FileNotFoundError(f"name2id file not found in: {self.processed_dir}")
             
         return lmdb_path, name2id_path
     
     def _connect_db(self):
-        """连接到LMDB数据库"""
+        """Connect to LMDB database"""
         if self.db is None:
             self.db = lmdb.open(
                 self.lmdb_path,
@@ -115,14 +110,14 @@ class CrossDockedDataset:
                 self.keys = [key.decode() for key in txn.cursor().iternext(values=False)]
     
     def _load_name2id(self):
-        """加载name2id映射"""
+        """Load name2id mapping"""
         if os.path.exists(self.name2id_path):
             self.name2id = torch.load(self.name2id_path)
         else:
-            raise FileNotFoundError(f"找不到name2id文件: {self.name2id_path}")
+            raise FileNotFoundError(f"name2id file not found: {self.name2id_path}")
     
     def _load_split(self):
-        """加载数据集分割"""
+        """Load dataset split"""
         split_file = os.path.join(self.processed_dir, 'split_by_name.pt')
         
         if os.path.exists(split_file):
@@ -132,12 +127,12 @@ class CrossDockedDataset:
                 train_list = split_data.get('train', [])
                 test_list = split_data.get('test', [])
             else:
-                # 如果是列表格式，假设前80%是训练集，后20%是测试集
+                # If list format, assume first 80% is train set, last 20% is test set
                 split_idx = int(len(split_data) * 0.8)
                 train_list = split_data[:split_idx]
                 test_list = split_data[split_idx:]
             
-            # 匹配键到索引
+            # Match keys to indices
             self.train_indices = []
             self.test_indices = []
             
@@ -185,12 +180,12 @@ class CrossDockedDataset:
                 if found_idx is not None:
                     self.test_indices.append(found_idx)
         else:
-            # 如果没有split文件，使用所有数据作为训练集
+            # If no split file, use all data as training set
             self.train_indices = list(range(len(self.keys)))
             self.test_indices = []
     
     def __len__(self) -> int:
-        """返回数据集大小"""
+        """Return dataset size"""
         if self.split == 'train':
             return len(self.train_indices)
         elif self.split == 'test':
@@ -199,7 +194,7 @@ class CrossDockedDataset:
             return len(self.keys)
     
     def _get_single_item(self, idx: Union[int, List, Tuple]) -> Optional[ProteinLigandData]:
-        """获取单个数据项"""
+        """Get single data item"""
         if self.db is None:
             self._connect_db()
         
@@ -212,10 +207,10 @@ class CrossDockedDataset:
                 key = key.encode()
             raw_data = pickle.loads(self.db.begin().get(key))
             
-            # 转换为ProteinLigandData对象
+            # Convert to ProteinLigandData object
             data = ProteinLigandData()
             
-            # 蛋白质数据
+            # Protein data
             if 'protein_pos' in raw_data:
                 data.protein_pos = torch.tensor(raw_data['protein_pos'], dtype=torch.float32)
             if 'protein_atom_feature' in raw_data:
@@ -225,7 +220,7 @@ class CrossDockedDataset:
             if 'protein_atom_to_aa_type' in raw_data:
                 data.protein_atom_to_aa_type = torch.tensor(raw_data['protein_atom_to_aa_type'], dtype=torch.long)
             
-            # 配体数据
+            # Ligand data
             if 'ligand_pos' in raw_data:
                 data.ligand_pos = torch.tensor(raw_data['ligand_pos'], dtype=torch.float32)
             if 'ligand_bond_type' in raw_data:
@@ -235,7 +230,7 @@ class CrossDockedDataset:
             if 'ligand_bond_index' in raw_data:
                 data.ligand_bond_index = torch.tensor(raw_data['ligand_bond_index'], dtype=torch.long)
             
-            # 其他属性
+            # Other attributes
             if 'ligand_context_pos' in raw_data:
                 data.ligand_context_pos = torch.tensor(raw_data['ligand_context_pos'], dtype=torch.float32)
             if 'ligand_context_feature' in raw_data:
@@ -252,7 +247,7 @@ class CrossDockedDataset:
             return None
     
     def __getitem__(self, idx: Union[int, List, Tuple]) -> Optional[ProteinLigandData]:
-        """获取数据项"""
+        """Get data item"""
         if isinstance(idx, list):
             return [self._get_single_item(i) for i in idx]
         elif isinstance(idx, tuple):
@@ -262,44 +257,39 @@ class CrossDockedDataset:
 
 
 class PDBBindDataset:
-    """PDBBind数据集类"""
     
     def __init__(self, root: str, split: Optional[str] = None):
         """
-        初始化PDBBind数据集
-        
-        Args:
-            root: 数据集根目录
-            split: 数据集分割 ('train', 'test', None)
+        Initialize PDBBind dataset
         """
         self.root = os.path.abspath(root)
         self.split = split
         
-        # 确定processed目录路径
+        # Determine processed directory path
         self.processed_dir = os.path.join(os.path.dirname(self.root), 'pdbbind_processed')
         self.processed_dir = os.path.abspath(self.processed_dir)
         
-        # 查找LMDB和name2id文件
+        # Find LMDB and name2id files
         self.lmdb_path, self.name2id_path = self._find_lmdb_and_name2id_files()
         
-        # 初始化数据库连接
+        # Initialize database connection
         self.db = None
         self.keys = []
         self.name2id = {}
         
-        # 加载数据
+        # Load data
         self._load_name2id()
         self._connect_db()
         
-        # 加载分割信息
+        # Load split information
         self.train_indices = []
         self.test_indices = []
         self._load_split()
     
     def _find_lmdb_and_name2id_files(self) -> Tuple[str, str]:
-        """查找LMDB和name2id文件"""
+        """Find LMDB and name2id files"""
         
-        # 可能的文件名模式
+        # Possible filename patterns
         lmdb_patterns = [
             'pdbbind_processed_full_ref_prior_aromatic.lmdb',
             '*.lmdb'
@@ -314,7 +304,7 @@ class PDBBindDataset:
         lmdb_path = None
         name2id_path = None
         
-        # 查找LMDB文件
+        # Find LMDB file
         for pattern in lmdb_patterns:
             if '*' not in pattern:
                 full_path = os.path.join(self.processed_dir, pattern)
@@ -322,14 +312,14 @@ class PDBBindDataset:
                     lmdb_path = os.path.abspath(full_path)
                     break
             else:
-                # 使用glob查找
+                # Use glob to find
                 import glob
                 matches = glob.glob(os.path.join(self.processed_dir, pattern))
                 if matches:
                     lmdb_path = os.path.abspath(matches[0])
                     break
         
-        # 查找name2id文件
+        # Find name2id file
         for pattern in name2id_patterns:
             if '*' not in pattern:
                 full_path = os.path.join(self.processed_dir, pattern)
@@ -337,7 +327,7 @@ class PDBBindDataset:
                     name2id_path = os.path.abspath(full_path)
                     break
             else:
-                # 使用glob查找
+                # Use glob to find
                 import glob
                 matches = glob.glob(os.path.join(self.processed_dir, pattern))
                 if matches:
@@ -345,14 +335,14 @@ class PDBBindDataset:
                     break
         
         if lmdb_path is None:
-            raise FileNotFoundError(f"找不到LMDB文件在: {self.processed_dir}")
+            raise FileNotFoundError(f"LMDB file not found in: {self.processed_dir}")
         if name2id_path is None:
-            raise FileNotFoundError(f"找不到name2id文件在: {self.processed_dir}")
+            raise FileNotFoundError(f"name2id file not found in: {self.processed_dir}")
             
         return lmdb_path, name2id_path
     
     def _connect_db(self):
-        """连接到LMDB数据库"""
+        """Connect to LMDB database"""
         if self.db is None:
             self.db = lmdb.open(
                 self.lmdb_path,
@@ -368,14 +358,14 @@ class PDBBindDataset:
                 self.keys = [key.decode() for key in txn.cursor().iternext(values=False)]
     
     def _load_name2id(self):
-        """加载name2id映射"""
+        """Load name2id mapping"""
         if os.path.exists(self.name2id_path):
             self.name2id = torch.load(self.name2id_path)
         else:
-            raise FileNotFoundError(f"找不到name2id文件: {self.name2id_path}")
+            raise FileNotFoundError(f"name2id file not found: {self.name2id_path}")
     
     def _load_split(self):
-        """加载数据集分割"""
+        """Load dataset split"""
         split_file = os.path.join(self.processed_dir, 'split_by_name.pt')
         
         if os.path.exists(split_file):
@@ -385,12 +375,12 @@ class PDBBindDataset:
                 train_list = split_data.get('train', [])
                 test_list = split_data.get('test', [])
             else:
-                # 如果是列表格式，假设前80%是训练集，后20%是测试集
+                # If list format, assume first 80% is train set, last 20% is test set
                 split_idx = int(len(split_data) * 0.8)
                 train_list = split_data[:split_idx]
                 test_list = split_data[split_idx:]
             
-            # 匹配键到索引
+            # Match keys to indices
             self.train_indices = []
             self.test_indices = []
             
@@ -438,12 +428,12 @@ class PDBBindDataset:
                 if found_idx is not None:
                     self.test_indices.append(found_idx)
         else:
-            # 如果没有split文件，使用所有数据作为训练集
+            # If no split file, use all data as training set
             self.train_indices = list(range(len(self.keys)))
             self.test_indices = []
     
     def __len__(self) -> int:
-        """返回数据集大小"""
+        """Return dataset size"""
         if self.split == 'train':
             return len(self.train_indices)
         elif self.split == 'test':
@@ -452,7 +442,7 @@ class PDBBindDataset:
             return len(self.keys)
     
     def _get_single_item(self, idx: Union[int, List, Tuple]) -> Optional[ProteinLigandData]:
-        """获取单个数据项"""
+        """Get single data item"""
         if self.db is None:
             self._connect_db()
         
@@ -465,10 +455,10 @@ class PDBBindDataset:
                 key = key.encode()
             raw_data = pickle.loads(self.db.begin().get(key))
             
-            # 转换为ProteinLigandData对象
+            # Convert to ProteinLigandData object
             data = ProteinLigandData()
             
-            # 蛋白质数据
+            # Protein data
             if 'protein_pos' in raw_data:
                 data.protein_pos = torch.tensor(raw_data['protein_pos'], dtype=torch.float32)
             if 'protein_atom_feature' in raw_data:
@@ -478,7 +468,7 @@ class PDBBindDataset:
             if 'protein_atom_to_aa_type' in raw_data:
                 data.protein_atom_to_aa_type = torch.tensor(raw_data['protein_atom_to_aa_type'], dtype=torch.long)
             
-            # 配体数据
+            # Ligand data
             if 'ligand_pos' in raw_data:
                 data.ligand_pos = torch.tensor(raw_data['ligand_pos'], dtype=torch.float32)
             if 'ligand_bond_type' in raw_data:
@@ -488,7 +478,7 @@ class PDBBindDataset:
             if 'ligand_bond_index' in raw_data:
                 data.ligand_bond_index = torch.tensor(raw_data['ligand_bond_index'], dtype=torch.long)
             
-            # 其他属性
+            # Other attributes
             if 'ligand_context_pos' in raw_data:
                 data.ligand_context_pos = torch.tensor(raw_data['ligand_context_pos'], dtype=torch.float32)
             if 'ligand_context_feature' in raw_data:
@@ -505,7 +495,7 @@ class PDBBindDataset:
             return None
     
     def __getitem__(self, idx: Union[int, List, Tuple]) -> Optional[ProteinLigandData]:
-        """获取数据项"""
+        """Get data item"""
         if isinstance(idx, list):
             return [self._get_single_item(i) for i in idx]
         elif isinstance(idx, tuple):
@@ -516,31 +506,24 @@ class PDBBindDataset:
 
 def get_model_dataset(config):
     """
-    获取模型数据集
-    
-    Args:
-        config: 配置对象，包含path和split_file等参数
-        
-    Returns:
-        dataset: 数据集对象
-        subsets: 训练和测试子集
+    Get model dataset
     """
     dataset_path = config.path
     split_file = getattr(config, 'split_file', None)
     
-    # 根据路径判断数据集类型
+    # Determine dataset type based on path
     if 'crossdocked' in dataset_path.lower():
         dataset = CrossDockedDataset(dataset_path)
     elif 'pdbbind' in dataset_path.lower():
         dataset = PDBBindDataset(dataset_path)
     else:
-        raise ValueError(f"未知的数据集类型: {dataset_path}")
+        raise ValueError(f"Unknown dataset type: {dataset_path}")
     
-    # 确保name2id已加载
+    # Ensure name2id is loaded
     if not hasattr(dataset, 'name2id') or not dataset.name2id:
         dataset._load_name2id()
     
-    # 处理分割
+    # Handle split
     if split_file and os.path.exists(split_file):
         split_data = torch.load(split_file)
         
@@ -548,12 +531,12 @@ def get_model_dataset(config):
             train_list = split_data.get('train', [])
             test_list = split_data.get('test', [])
         else:
-            # 如果是列表格式，假设前80%是训练集，后20%是测试集
+            # If list format, assume first 80% is train set, last 20% is test set
             split_idx = int(len(split_data) * 0.8)
             train_list = split_data[:split_idx]
             test_list = split_data[split_idx:]
         
-        # 匹配键到索引
+        # Match keys to indices
         train_indices = []
         test_indices = []
         
@@ -601,12 +584,12 @@ def get_model_dataset(config):
             if found_idx is not None:
                 test_indices.append(found_idx)
         
-        # 创建子集
+        # Create subsets
         from torch.utils.data import Subset
         train_subset = Subset(dataset, train_indices)
         test_subset = Subset(dataset, test_indices)
         
         return dataset, (train_subset, test_subset)
     else:
-        # 没有split文件，返回完整数据集
+        # No split file, return complete dataset
         return dataset

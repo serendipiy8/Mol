@@ -10,12 +10,6 @@ from scipy.spatial.distance import cdist
 def compute_golden_prior_from_data(data):
     """
     Compute golden prior information from data
-    
-    Args:
-        data: ProteinLigandData object
-    
-    Returns:
-        data: ProteinLigandData object with prior information added
     """
     # Compute ligand atom prior masks
     if hasattr(data, 'ligand_atom_mask') and hasattr(data, 'ligand_pos'):
@@ -38,12 +32,6 @@ def compute_golden_prior_from_data(data):
 def compute_ligand_prior_masks(data):
     """
     Compute ligand atom prior masks
-    
-    Args:
-        data: ProteinLigandData object
-    
-    Returns:
-        prior_masks: Prior mask tensor
     """
     num_atoms = data.ligand_pos.size(0)
     num_arms = data.num_arms
@@ -69,12 +57,6 @@ def compute_ligand_prior_masks(data):
 def compute_pocket_prior_masks(data):
     """
     Compute protein pocket prior masks
-    
-    Args:
-        data: ProteinLigandData object
-    
-    Returns:
-        pocket_prior_masks: Pocket prior mask tensor
     """
     if not hasattr(data, 'pocket_atom_masks'):
         return None
@@ -102,12 +84,6 @@ def compute_pocket_prior_masks(data):
 def compute_decomp_centers(data):
     """
     Compute decomposition center points
-    
-    Args:
-        data: ProteinLigandData object
-    
-    Returns:
-        decomp_centers: Decomposition center point coordinates
     """
     if not hasattr(data, 'ligand_atom_mask'):
         return None
@@ -141,13 +117,6 @@ def compute_decomp_centers(data):
 def compute_distance_prior(data, max_distance=10.0):
     """
     Compute prior information based on distance
-    
-    Args:
-        data: ProteinLigandData object
-        max_distance: Maximum distance threshold
-    
-    Returns:
-        distance_prior: Distance prior matrix
     """
     if not (hasattr(data, 'protein_pos') and hasattr(data, 'ligand_pos')):
         return None
@@ -167,13 +136,6 @@ def compute_distance_prior(data, max_distance=10.0):
 def compute_contact_prior(data, contact_cutoff=4.0):
     """
     Compute prior information based on contact
-    
-    Args:
-        data: ProteinLigandData object
-        contact_cutoff: Contact distance threshold
-    
-    Returns:
-        contact_prior: Contact prior matrix
     """
     if not (hasattr(data, 'protein_pos') and hasattr(data, 'ligand_pos')):
         return None
@@ -195,12 +157,6 @@ def compute_contact_prior(data, contact_cutoff=4.0):
 def compute_geometric_prior(data):
     """
     Compute geometric prior information
-    
-    Args:
-        data: ProteinLigandData object
-    
-    Returns:
-        geometric_prior: Geometric prior information
     """
     prior_info = {}
     
@@ -233,12 +189,6 @@ def compute_geometric_prior(data):
 def compute_chemical_prior(data):
     """
     Compute chemical prior information
-    
-    Args:
-        data: ProteinLigandData object
-    
-    Returns:
-        chemical_prior: Chemical prior information
     """
     prior_info = {}
     
@@ -271,13 +221,6 @@ def compute_chemical_prior(data):
 def apply_prior_noise(prior_masks, noise_std=0.1):
     """
     Add noise to prior masks
-    
-    Args:
-        prior_masks: Prior mask tensor
-        noise_std: Noise standard deviation
-    
-    Returns:
-        noisy_prior: Prior mask with noise
     """
     if prior_masks is None:
         return None
@@ -297,13 +240,6 @@ def apply_prior_noise(prior_masks, noise_std=0.1):
 def compute_beta_prior(data, beta=1.0):
     """
     Compute Beta prior distribution
-    
-    Args:
-        data: ProteinLigandData object
-        beta: Beta distribution parameter
-    
-    Returns:
-        beta_prior: Beta prior distribution
     """
     if not hasattr(data, 'ligand_atom_mask'):
         return None
@@ -331,12 +267,6 @@ def compute_beta_prior(data, beta=1.0):
 def compute_prior_statistics(data):
     """
     Compute prior statistics
-    
-    Args:
-        data: ProteinLigandData object
-    
-    Returns:
-        stats: Prior statistics dictionary
     """
     stats = {}
     

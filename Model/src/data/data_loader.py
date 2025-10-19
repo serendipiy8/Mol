@@ -11,7 +11,7 @@ from .transforms import get_default_transform
 
 
 def _default_collate_fn(batch):
-    """默认的collate函数"""
+    """Default collate function"""
     batch = [item for item in batch if item is not None]
     if not batch:
         return None
@@ -23,7 +23,7 @@ def _default_collate_fn(batch):
 
 
 def collate_fn_protein_ligand(batch):
-    """蛋白质-配体数据的collate函数"""
+    """Protein-ligand data collate function"""
     batch = [item for item in batch if item is not None]
     if not batch:
         return None
@@ -37,27 +37,14 @@ def collate_fn_protein_ligand(batch):
 def get_data_loaders(dataset_path, split_file=None, batch_size=32, num_workers=0, 
                     shuffle_train=True, shuffle_test=False, collate_fn=None):
     """
-    获取训练和测试数据加载器
-    
-    Args:
-        dataset_path: 数据集路径
-        split_file: 分割文件路径
-        batch_size: 批次大小
-        num_workers: 工作进程数
-        shuffle_train: 是否打乱训练数据
-        shuffle_test: 是否打乱测试数据
-        collate_fn: collate函数
-        
-    Returns:
-        train_loader: 训练数据加载器
-        test_loader: 测试数据加载器
+    Get training and test data loaders
     """
-    # 创建配置对象
+    # Create config object
     config = argparse.Namespace()
     config.path = dataset_path
     config.split_file = split_file
     
-    # 获取数据集
+    # Get dataset
     result = get_model_dataset(config)
     if isinstance(result, tuple):
         dataset, (train_subset, test_subset) = result
@@ -65,11 +52,11 @@ def get_data_loaders(dataset_path, split_file=None, batch_size=32, num_workers=0
         dataset = result
         train_subset = test_subset = None
     
-    # 设置collate函数
+    # Set collate function
     if collate_fn is None:
         collate_fn = collate_fn_protein_ligand
     
-    # 创建数据加载器
+    # Create data loaders
     train_loader = None
     test_loader = None
     
@@ -99,25 +86,14 @@ def get_data_loaders(dataset_path, split_file=None, batch_size=32, num_workers=0
 def get_balanced_data_loaders(dataset_path, split_file=None, batch_size=32, 
                             num_workers=0, collate_fn=None):
     """
-    获取平衡的数据加载器（使用SubsetRandomSampler）
-    
-    Args:
-        dataset_path: 数据集路径
-        split_file: 分割文件路径
-        batch_size: 批次大小
-        num_workers: 工作进程数
-        collate_fn: collate函数
-        
-    Returns:
-        train_loader: 训练数据加载器
-        test_loader: 测试数据加载器
+    Get balanced data loaders (using SubsetRandomSampler)
     """
-    # 创建配置对象
+    # Create config object
     config = argparse.Namespace()
     config.path = dataset_path
     config.split_file = split_file
     
-    # 获取数据集
+    # Get dataset
     result = get_model_dataset(config)
     if isinstance(result, tuple):
         dataset, (train_subset, test_subset) = result
@@ -125,11 +101,11 @@ def get_balanced_data_loaders(dataset_path, split_file=None, batch_size=32,
         dataset = result
         train_subset = test_subset = None
     
-    # 设置collate函数
+    # Set collate function
     if collate_fn is None:
         collate_fn = collate_fn_protein_ligand
     
-    # 创建数据加载器
+    # Create data loaders
     train_loader = None
     test_loader = None
     
@@ -159,20 +135,20 @@ def get_balanced_data_loaders(dataset_path, split_file=None, batch_size=32,
 
 
 def get_transform_configs_for_splits(config):
-    """为不同分割获取变换配置"""
+    """Get transform configurations for different splits"""
     train_config = argparse.Namespace()
     test_config = argparse.Namespace()
     
-    # 复制原始配置
+    # Copy original config
     for attr in dir(config):
         if not attr.startswith('_'):
             setattr(train_config, attr, getattr(config, attr))
             setattr(test_config, attr, getattr(config, attr))
     
-    # 训练集使用默认变换
+    # Training set uses default transform
     train_config.transform = get_default_transform()
     
-    # 测试集不使用变换或使用更简单的变换
+    # Test set uses no transform or simpler transform
     test_config.transform = None
     
     return train_config, test_config
@@ -180,16 +156,7 @@ def get_transform_configs_for_splits(config):
 
 def get_data_loaders_with_split_transforms(config, batch_size=32, num_workers=0):
     """
-    获取带有分割特定变换的数据加载器
-    
-    Args:
-        config: 配置对象
-        batch_size: 批次大小
-        num_workers: 工作进程数
-        
-    Returns:
-        train_loader: 训练数据加载器
-        test_loader: 测试数据加载器
+    Get data loaders with split-specific transforms
     """
     train_config, test_config = get_transform_configs_for_splits(config)
     
@@ -216,16 +183,7 @@ def get_data_loaders_with_split_transforms(config, batch_size=32, num_workers=0)
 
 def get_proper_data_loaders(config, batch_size=32, num_workers=0):
     """
-    获取合适的数据加载器（推荐使用）
-    
-    Args:
-        config: 配置对象
-        batch_size: 批次大小
-        num_workers: 工作进程数
-        
-    Returns:
-        train_loader: 训练数据加载器
-        test_loader: 测试数据加载器
+    Get proper data loaders (recommended)
     """
     return get_data_loaders(
         config.path,
