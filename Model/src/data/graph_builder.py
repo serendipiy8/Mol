@@ -82,11 +82,10 @@ class HeteroGraphBuilder:
         edge_types = []
         
 
-        # Add chemical bonds if provided
         if ligand_bond_index is not None and ligand_bond_index.size(1) > 0:
-            edges.append(ligand_bond_index)
+            edges.append(ligand_bond_index.to(ligand_pos.device))
             if ligand_bond_type is not None:
-                edge_types.append(ligand_bond_type)
+                edge_types.append(ligand_bond_type.to(ligand_pos.device))
         
         if ligand_bond_index is not None:
             existing_edges = set()
@@ -109,7 +108,7 @@ class HeteroGraphBuilder:
                         new_edges.append([i, j])
         
         if new_edges:
-            spatial_edges = torch.tensor(new_edges).t()
+            spatial_edges = torch.tensor(new_edges, dtype=torch.long, device=ligand_pos.device).t()
             edges.append(spatial_edges)
             edge_types.append(torch.zeros(spatial_edges.size(1), dtype=torch.long, device=ligand_pos.device))
         

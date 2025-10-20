@@ -10,7 +10,9 @@ class SoftMaskTransform:
     """
     
     def __init__(self, num_steps: int = 1000, kappa: float = 0.1, alpha_schedule: str = 'linear', 
-                 device: str = 'cuda', w_max: float = 1e3, eps: float = 1e-8):
+                 device: str = 'cuda', w_max: float = 1e3, eps: float = 1e-8,
+                 kappa_start: float = None, kappa_end: float = None, kappa_schedule: str = 'linear'):
+                 
         self.num_steps = num_steps
         self.kappa = kappa
         self.alpha_schedule = alpha_schedule
@@ -19,6 +21,9 @@ class SoftMaskTransform:
         self.eps = eps   
         
         self.alpha_values = self._compute_alpha_schedule()
+        self.kappa_values = None
+        if kappa_start is not None and kappa_end is not None:
+            self.kappa_values = self._compute_kappa_schedule(kappa_start, kappa_end, kappa_schedule)
     
     # compute alpha schedule for time steps (t)
     def _compute_alpha_schedule(self) -> torch.Tensor:
@@ -34,6 +39,21 @@ class SoftMaskTransform:
             raise ValueError(f"Unknown alpha schedule: {self.alpha_schedule}")
         
         return alpha
+
+    def _compute_kappa_schedule(self, kappa_start: float, kappa_end: float, schedule: str) -> torch.Tensor:
+        if schedule == 'linear':
+            base = torch.linspace(0, 1, self.num_steps + 1, device=self.device)
+        elif schedule == 'cosine':
+            t = torch.linspace(0, 1, self.num_steps + 1, device=self.device)
+            base = 0.5 * (1 + torch.cos(np.pi * (1 - t)))
+        elif schedule == 'quadratic':
+            t = torch.linspace(0, 1, self.num_steps + 1, device=self.device)
+            base = t ** 2
+        else:
+            raise ValueError(f"Unknown kappa schedule: {schedule}")
+        return torch.tensor(float(kappa_start), device=self.device) + (
+            torch.tensor(float(kappa_end) - float(kappa_start), device=self.device) * base
+        )
     
     def _validate_inputs(self, tau: torch.Tensor, t: Union[int, torch.Tensor]):
         if tau.dim() != 1:
@@ -64,9 +84,18 @@ class SoftMaskTransform:
             raise TypeError("t must be int or Tensor")
 
         alpha_t = self.alpha_values[t_idx]
+        # Align devices to tau.device for safe arithmetic
+        if alpha_t.device != tau.device:
+            alpha_t = alpha_t.to(tau.device)
+        if self.kappa_values is not None:
+            kappa_t = self.kappa_values[t_idx]
+            if kappa_t.device != tau.device:
+                kappa_t = kappa_t.to(tau.device)
+        else:
+            kappa_t = torch.tensor(self.kappa, device=tau.device)
 
-        # Compute soft mask: s_t(i) = sigm((α(t) - τ_i) / κ)
-        soft_mask = torch.sigmoid((alpha_t - tau) / self.kappa)
+        # Compute soft mask: s_t(i) = sigm((α(t) - τ_i) / κ_t)
+        soft_mask = torch.sigmoid((alpha_t - tau) / kappa_t)
         
         return soft_mask
     
@@ -86,6 +115,8 @@ class SoftMaskTransform:
         """
 
         s_t = self.compute_soft_mask(tau, t)
+        if s_t.device != x0.device:
+            s_t = s_t.to(x0.device)
         noise = torch.randn_like(x0) * sigma_t
         
         # forward add noise: x_t = s_t * x_0 + (1 - s_t) * η_t
@@ -113,6 +144,8 @@ class SoftMaskTransform:
         """
 
         s_t = self.compute_soft_mask(tau, t)
+        if s_t.device != x0_coord.device:
+            s_t = s_t.to(x0_coord.device)
         
         # Coordinate noise
         noise_coord = torch.randn_like(x0_coord) * sigma_t_coord
@@ -269,14 +302,18 @@ class SoftMaskDataTransform:
 
 def create_soft_mask_transforms(num_steps: int = 1000, kappa: float = 0.1,
                                alpha_schedule: str = 'linear', device: str = 'cuda',
-                               w_max: float = 1e3, eps: float = 1e-8) -> SoftMaskDataTransform:
+                               w_max: float = 1e3, eps: float = 1e-8,
+                               kappa_start: float = None, kappa_end: float = None, kappa_schedule: str = 'linear') -> SoftMaskDataTransform:
     soft_mask_transform = SoftMaskTransform(
         num_steps=num_steps,
         kappa=kappa,
         alpha_schedule=alpha_schedule,
         device=device,
         w_max=w_max,
-        eps=eps)
+        eps=eps,
+        kappa_start=kappa_start,
+        kappa_end=kappa_end,
+        kappa_schedule=kappa_schedule)
     
     reparameterization = LogisticNormalReparameterization(device=device, eps=eps)
     

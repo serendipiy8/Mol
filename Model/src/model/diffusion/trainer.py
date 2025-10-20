@@ -97,8 +97,6 @@ class DiffusionTrainer:
     def training_step(self, batch: Data, model, soft_mask_transform) -> Dict[str, float]:
         
         self._assert_batch(batch)
-
-        # Devices: align to trainer device
         x0 = batch.ligand_pos.to(self.device)
 
         # Get tau from model q_phi if available; fallback to batch.tau if provided
@@ -114,13 +112,13 @@ class DiffusionTrainer:
             if hasattr(batch, 'tau') and batch.tau is not None:
                 tau = batch.tau.to(self.device)
             else:
-                # default neutral mask if nothing provided (rare path)
                 tau = torch.full((x0.size(0),), 0.5, device=self.device)
 
         has_feat = hasattr(batch, 'ligand_atom_feature') and batch.ligand_atom_feature is not None
 
-        # Sample random time steps (per node)
-        t = torch.randint(0, self.diffusion_process.num_steps, (x0.size(0),), device=self.device, dtype=torch.long)
+        # Sample a single time step shared by all nodes
+        t_scalar = torch.randint(0, self.diffusion_process.num_steps, (1,), device=self.device, dtype=torch.long).item()
+        t = torch.full((x0.size(0),), t_scalar, device=self.device, dtype=torch.long)
         self._assert_shapes_pre(x0, tau, t)
 
         if has_feat:
@@ -128,19 +126,23 @@ class DiffusionTrainer:
             x_t, h_t, s_t = self.diffusion_process.forward_process_multi_modal(x0, h0, tau, t, soft_mask_transform)
             self._assert_shapes_post_coord(x_t, s_t, x0)
             self._assert_shapes_post_multi(h0, h_t, s_t, x0)
+
             forward_fn = getattr(model, 'forward', model)
             sig = inspect.signature(forward_fn)
             if 'h_t' in sig.parameters:
                 model_out = model(x_t, s_t, t, batch, h_t)
             else:
                 model_out = model(x_t, s_t, t, batch)
+
             if isinstance(model_out, (tuple, list)) and len(model_out) == 2:
                 x0_pred, h0_pred = model_out
             else:
                 x0_pred, h0_pred = model_out, None
             self._assert_model_outputs(x0_pred, x0, h0_pred, h0)
+
             sigma_coord = self.diffusion_process.sigmas[t]
             sigma_feat = self.diffusion_process.sigmas[t]
+            
             if h0_pred is not None:
                 diffusion_loss = self.loss_fn.compute_loss_multi_modal(x0, x0_pred, h0, h0_pred, s_t, sigma_coord, sigma_feat, self.lambda_feat)
             else:

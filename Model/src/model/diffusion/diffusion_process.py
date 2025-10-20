@@ -3,6 +3,7 @@ import inspect
 from typing import Dict, List, Tuple, Optional, Union
 from torch_geometric.data import Data
 from .noise_schedulers import build_sigma_schedule
+from .soft_mask_scheduler import build_alpha_schedule
 
 """
 Core diffusion process implementation for LO-MaskDiff
@@ -12,12 +13,18 @@ Implements the forward and reverse diffusion processes with soft masking
 class SoftMaskDiffusionProcess:
 
     def __init__(self, num_steps: int = 1000, sigma_min: float = 0.5,
-                 sigma_max: float = 1.0, sigma_schedule: str = 'linear', device: str = 'cuda'):
+                 sigma_max: float = 1.0, sigma_schedule: str = 'linear', device: str = 'cuda',
+                 bind_sigma_to_alpha: bool = False, alpha_schedule: str = 'linear'):
         self.num_steps = num_steps
         self.device = device
+        # Optional sigma-alpha binding
+        self.alpha_values = None
+        if bind_sigma_to_alpha:
+            self.alpha_values = build_alpha_schedule(num_steps=self.num_steps, schedule=alpha_schedule, device=device)
         self.sigmas = build_sigma_schedule(num_steps=self.num_steps, sigma_min=sigma_min,
                                            sigma_max=sigma_max, schedule=sigma_schedule,
-                                           device=device)
+                                           device=device, bind_alpha=bind_sigma_to_alpha,
+                                           alpha_values=self.alpha_values)
     
     def get_sigma_t(self, t: Union[int, torch.Tensor]) -> torch.Tensor:
         if isinstance(t, int):
@@ -176,6 +183,7 @@ class SoftMaskDiffusionProcess:
         Returns:
             x0: Generated coordinates [N_nodes, 3]
         """
+        
         if num_steps is None:
             num_steps = self.num_steps
         
