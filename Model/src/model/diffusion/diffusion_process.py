@@ -2,7 +2,6 @@ import torch
 import inspect
 from typing import Dict, List, Tuple, Optional, Union
 from torch_geometric.data import Data
-from .losses import DiffusionLoss
 from .noise_schedulers import build_sigma_schedule
 
 """
@@ -11,19 +10,13 @@ Implements the forward and reverse diffusion processes with soft masking
 """
 
 class SoftMaskDiffusionProcess:
-    """
-    Core diffusion process with soft masking mechanism (pure soft-mask paradigm).
-    Uses sigma (std) schedule; no beta/alpha schedules.
-    """
-    
+
     def __init__(self, num_steps: int = 1000, sigma_min: float = 0.5,
                  sigma_max: float = 1.0, sigma_schedule: str = 'linear', device: str = 'cuda'):
         self.num_steps = num_steps
         self.device = device
-        self.sigmas = build_sigma_schedule(num_steps=self.num_steps,
-                                           sigma_min=sigma_min,
-                                           sigma_max=sigma_max,
-                                           schedule=sigma_schedule,
+        self.sigmas = build_sigma_schedule(num_steps=self.num_steps, sigma_min=sigma_min,
+                                           sigma_max=sigma_max, schedule=sigma_schedule,
                                            device=device)
     
     def get_sigma_t(self, t: Union[int, torch.Tensor]) -> torch.Tensor:
@@ -35,7 +28,6 @@ class SoftMaskDiffusionProcess:
             raise TypeError("t must be int or Tensor")
         return self.sigmas[t_idx]
     
-    # sigma schedule is provided by noise_schedulers.build_sigma_schedule
     
     def forward_process(self, x0: torch.Tensor, tau: torch.Tensor, t: Union[int, torch.Tensor],
                        soft_mask_transform) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -244,96 +236,3 @@ class SoftMaskDiffusionProcess:
 
 
 
-
-class DiffusionTrainer:
-    """
-    Training utilities for diffusion process
-    """
-    
-    def __init__(self,
-                 diffusion_process: SoftMaskDiffusionProcess,
-                 loss_fn: DiffusionLoss,
-                 optimizer: torch.optim.Optimizer,
-                 device: str = 'cuda',
-                 lambda_feat: float = 1.0):
-        """
-        Initialize diffusion trainer
-        
-        Args:
-            diffusion_process: Diffusion process instance
-            loss_fn: Loss function
-            optimizer: Optimizer
-            device: Computation device
-        """
-        self.diffusion_process = diffusion_process
-        self.loss_fn = loss_fn
-        self.optimizer = optimizer
-        self.device = device
-        self.lambda_feat = lambda_feat
-    
-    def training_step(self,
-                     batch: Data,
-                     model,
-                     soft_mask_transform) -> Dict[str, float]:
-        """
-        Single training step
-        
-        Args:
-            batch: Batch of data
-            model: Denoising model
-            soft_mask_transform: Soft mask transform
-            
-        Returns:
-            losses: Dictionary of loss values
-        """
-        # Get ligand coordinates and optional features
-        x0 = batch.ligand_pos
-        has_feat = hasattr(batch, 'ligand_atom_feature') and batch.ligand_atom_feature is not None
-        
-        # Sample random time steps (per node)
-        t = torch.randint(0, self.diffusion_process.num_steps, (x0.size(0),), device=self.device, dtype=torch.long)
-        
-        if has_feat:
-            h0 = batch.ligand_atom_feature
-            x_t, h_t, s_t = self.diffusion_process.forward_process_multi_modal(x0, h0, batch.tau, t, soft_mask_transform)
-            forward_fn = getattr(model, 'forward', model)
-            sig = inspect.signature(forward_fn)
-            if 'h_t' in sig.parameters:
-                model_out = model(x_t, s_t, t, batch, h_t)
-            else:
-                model_out = model(x_t, s_t, t, batch)
-            if isinstance(model_out, (tuple, list)) and len(model_out) == 2:
-                x0_pred, h0_pred = model_out
-            else:
-                x0_pred, h0_pred = model_out, None
-            sigma_coord = self.diffusion_process.sigmas[t]
-            sigma_feat = self.diffusion_process.sigmas[t]
-            if h0_pred is not None:
-                diffusion_loss = self.loss_fn.compute_loss_multi_modal(x0, x0_pred, h0, h0_pred, s_t, sigma_coord, sigma_feat, self.lambda_feat)
-            else:
-                diffusion_loss = self.loss_fn.compute_loss(x0, x0_pred, s_t, sigma_coord)
-        else:
-            x_t, s_t = self.diffusion_process.forward_process(x0, batch.tau, t, soft_mask_transform)
-            x0_pred = model(x_t, s_t, t, batch)
-            sigma_t = self.diffusion_process.sigmas[t]
-            diffusion_loss = self.loss_fn.compute_loss(x0, x0_pred, s_t, sigma_t)
-        
-        # KL loss for τ parameters
-        if hasattr(batch, 'tau_mu') and hasattr(batch, 'tau_log_sigma'):
-            kl_loss = self.loss_fn.compute_kl_loss(batch.tau_mu, batch.tau_log_sigma)
-        else:
-            kl_loss = torch.tensor(0.0, device=self.device)
-        
-        # Total loss
-        total_loss = diffusion_loss + 0.1 * kl_loss
-        
-        # Backward pass
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        self.optimizer.step()
-        
-        return {
-            'total_loss': total_loss.item(),
-            'diffusion_loss': diffusion_loss.item(),
-            'kl_loss': kl_loss.item()
-        }

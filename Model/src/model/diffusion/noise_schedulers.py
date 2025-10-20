@@ -3,14 +3,9 @@ import numpy as np
 from typing import Literal
 
 
-def build_sigma_schedule(num_steps: int,
-                         sigma_min: float = 0.5,
-                         sigma_max: float = 1.0,
+def build_sigma_schedule(num_steps: int, sigma_min: float = 0.5, sigma_max: float = 1.0,
                          schedule: Literal['linear', 'cosine', 'quadratic', 'constant'] = 'linear',
-                         device: str = 'cpu') -> torch.Tensor:
-    """
-    Build sigma (std) schedule matching SoftMaskTransform naming.
-    """
+                         device: str = 'cuda') -> torch.Tensor:
     if schedule == 'constant':
         sigmas = torch.full((num_steps,), float(sigma_max))
     elif schedule == 'linear':

@@ -2,11 +2,10 @@ import torch
 import numpy as np
 from typing import Literal, Union
 
-
-def build_alpha_schedule(num_steps: int,
-                         schedule: Literal['linear', 'cosine', 'quadratic'] = 'linear',
+# build alpha(t) schedule with same naming as SoftMaskTransform
+def build_alpha_schedule(num_steps: int, schedule: Literal['linear', 'cosine', 'quadratic'] = 'linear',
                          device: str = 'cpu') -> torch.Tensor:
-    """Build alpha(t) schedule with same naming as SoftMaskTransform."""
+
     if schedule == 'linear':
         alpha = torch.linspace(0, 1, num_steps + 1, device=device)
     elif schedule == 'cosine':
@@ -20,11 +19,9 @@ def build_alpha_schedule(num_steps: int,
     return alpha
 
 
-def compute_soft_mask(alpha_values: torch.Tensor,
-                      tau: torch.Tensor,
-                      t: Union[int, torch.Tensor],
+def compute_soft_mask(alpha_values: torch.Tensor, tau: torch.Tensor, t: Union[int, torch.Tensor],
                       kappa: float) -> torch.Tensor:
-    """Compute s_t = sigmoid((alpha(t) - tau)/kappa)."""
+                      
     if isinstance(t, int):
         t_idx = torch.tensor(t, device=alpha_values.device, dtype=torch.long)
     else:
