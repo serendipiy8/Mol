@@ -1,1 +1,0 @@
-# Protein encoder implementation

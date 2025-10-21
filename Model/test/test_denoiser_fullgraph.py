@@ -13,7 +13,7 @@ import torch
 from torch_geometric.data import Data
 
 from src.data.soft_mask_transforms import create_soft_mask_transforms
-from src.model.denoiser.egnn import EGNNDenoiser
+from src.model.denoiser import EGNNDenoiser
 from src.model.diffusion.diffusion_process import SoftMaskDiffusionProcess
 from src.model.diffusion.trainer import DiffusionTrainer
 from src.model.diffusion.losses import DiffusionLoss

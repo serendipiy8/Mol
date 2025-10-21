@@ -237,14 +237,18 @@ class LogisticNormalReparameterization:
         Returns:
             kl_div: KL divergence [N_nodes]
         """
+        # ensure prior params are tensors on the same device/dtype
+        prior_mu_t = torch.tensor(prior_mu, device=mu.device, dtype=mu.dtype)
+        prior_sigma_t = torch.tensor(prior_sigma, device=mu.device, dtype=mu.dtype)
+
         sigma = torch.exp(torch.clamp(log_sigma, min=-10, max=10))
-        
-        # KL divergence for normal distributions
+
+        # KL divergence for normal distributions (element-wise)
         kl_div = 0.5 * (
-            (sigma / prior_sigma) ** 2 + 
-            ((mu - prior_mu) / prior_sigma) ** 2 - 
-            1 + 
-            2 * (torch.log(prior_sigma + self.eps) - log_sigma)
+            (sigma / prior_sigma_t) ** 2 +
+            ((mu - prior_mu_t) / prior_sigma_t) ** 2 -
+            1 +
+            2 * (torch.log(prior_sigma_t + self.eps) - log_sigma)
         )
         
         return kl_div
@@ -273,9 +277,9 @@ class SoftMaskDataTransform:
             data: Modified data with soft mask information
         """
 
-        if not hasattr(data, 'ligand_pos'):
+        if not hasattr(data, 'ligand_pos') or data.ligand_pos is None:
             raise ValueError("Data must contain ligand_pos")
-        if not hasattr(data, 'ligand_atom_feature'):
+        if not hasattr(data, 'ligand_atom_feature') or data.ligand_atom_feature is None:
             raise ValueError("Data must contain ligand_atom_feature")
         
 

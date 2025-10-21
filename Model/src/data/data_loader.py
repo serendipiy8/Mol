@@ -3,15 +3,16 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-from torch.utils.data import DataLoader, SubsetRandomSampler
+import torch.utils.data as tud
+from torch.utils.data import SubsetRandomSampler, Subset
 from torch_geometric.data import Batch
 import argparse
 from .dataset import get_model_dataset
 from .transforms import get_default_transform
+from .utils import ProteinLigandDataLoader
 
 
 def _default_collate_fn(batch):
-    """Default collate function"""
     batch = [item for item in batch if item is not None]
     if not batch:
         return None
@@ -23,7 +24,6 @@ def _default_collate_fn(batch):
 
 
 def collate_fn_protein_ligand(batch):
-    """Protein-ligand data collate function"""
     batch = [item for item in batch if item is not None]
     if not batch:
         return None
@@ -34,17 +34,52 @@ def collate_fn_protein_ligand(batch):
         return batch[0] if batch else None
 
 
+def _filter_indices_by_predicate(dataset, indices, predicate_fn):
+    """Return filtered indices that satisfy predicate(dataset[i])."""
+    filtered = []
+    for idx in indices:
+        sample = dataset[idx]
+        try:
+            if predicate_fn(sample):
+                filtered.append(idx)
+        except Exception:
+            continue
+    return filtered
+
+
+def worker_init_reconnect_db(worker_id: int):
+    """Top-level worker init: reconnect LMDB inside each worker (Windows-safe)."""
+    try:
+        info = tud.get_worker_info()
+    except Exception:
+        info = None
+    if info is None:
+        return
+    ds = info.dataset
+    try:
+        while isinstance(ds, Subset):
+            ds = ds.dataset
+    except Exception:
+        pass
+    try:
+        if hasattr(ds, '_connect_db'):
+            ds._connect_db()
+    except Exception:
+        pass
+
+
 def get_data_loaders(dataset_path, split_file=None, batch_size=32, num_workers=0, 
-                    shuffle_train=True, shuffle_test=False, collate_fn=None):
+                    shuffle_train=True, shuffle_test=False, collate_fn=None,
+                    require_ligand: bool = False, require_feat: bool = False,
+                    require_protein: bool = False):
     """
     Get training and test data loaders
     """
-    # Create config object
+
     config = argparse.Namespace()
     config.path = dataset_path
     config.split_file = split_file
     
-    # Get dataset
     result = get_model_dataset(config)
     if isinstance(result, tuple):
         dataset, (train_subset, test_subset) = result
@@ -52,42 +87,63 @@ def get_data_loaders(dataset_path, split_file=None, batch_size=32, num_workers=0
         dataset = result
         train_subset = test_subset = None
     
-    # Set collate function
-    if collate_fn is None:
-        collate_fn = collate_fn_protein_ligand
-    
-    # Create data loaders
     train_loader = None
     test_loader = None
     
+    # (kept for compatibility, no longer used)
+    def _resolve_base_dataset(ds):
+        return ds.dataset if isinstance(ds, Subset) else ds
+
+    # Optional: filter subsets by presence of ligand_pos(/features)
+    def _pred_ok(sample):
+        if sample is None:
+            return False
+        ok = True
+        if require_protein:
+            ok = ok and hasattr(sample, 'protein_pos') and sample.protein_pos is not None and sample.protein_pos.numel() > 0
+        if require_ligand:
+            ok = ok and hasattr(sample, 'ligand_pos') and sample.ligand_pos is not None and sample.ligand_pos.numel() > 0
+        if require_feat:
+            ok = ok and hasattr(sample, 'ligand_atom_feature') and sample.ligand_atom_feature is not None and sample.ligand_atom_feature.numel() > 0
+        return ok
+
     if train_subset is not None:
-        train_loader = DataLoader(
-            train_subset,
-            batch_size=batch_size,
-            shuffle=shuffle_train,
-            num_workers=num_workers,
-            collate_fn=collate_fn,
-            pin_memory=True
-        )
+        if hasattr(train_subset, 'indices') and len(train_subset.indices) == 0:
+            train_loader = None
+        else:
+            train_loader = ProteinLigandDataLoader(
+                train_subset,
+                batch_size=batch_size,
+                shuffle=shuffle_train,
+                num_workers=num_workers,
+                pin_memory=True,
+                persistent_workers=True if num_workers and num_workers > 0 else False,
+                prefetch_factor=2 if num_workers and num_workers > 0 else None,
+                worker_init_fn=worker_init_reconnect_db,
+                collate_fn=collate_fn_protein_ligand
+            )
     
     if test_subset is not None:
-        test_loader = DataLoader(
-            test_subset,
-            batch_size=batch_size,
-            shuffle=shuffle_test,
-            num_workers=num_workers,
-            collate_fn=collate_fn,
-            pin_memory=True
-        )
+        if hasattr(test_subset, 'indices') and len(test_subset.indices) == 0:
+            test_loader = None
+        else:
+            test_loader = ProteinLigandDataLoader(
+                test_subset,
+                batch_size=batch_size,
+                shuffle=shuffle_test,
+                num_workers=num_workers,
+                pin_memory=True,
+                persistent_workers=True if num_workers and num_workers > 0 else False,
+                prefetch_factor=2 if num_workers and num_workers > 0 else None,
+                worker_init_fn=worker_init_reconnect_db,
+                collate_fn=collate_fn_protein_ligand
+            )
     
     return train_loader, test_loader
 
 
 def get_balanced_data_loaders(dataset_path, split_file=None, batch_size=32, 
                             num_workers=0, collate_fn=None):
-    """
-    Get balanced data loaders (using SubsetRandomSampler)
-    """
     # Create config object
     config = argparse.Namespace()
     config.path = dataset_path
@@ -101,33 +157,27 @@ def get_balanced_data_loaders(dataset_path, split_file=None, batch_size=32,
         dataset = result
         train_subset = test_subset = None
     
-    # Set collate function
-    if collate_fn is None:
-        collate_fn = collate_fn_protein_ligand
-    
-    # Create data loaders
+    # Create data loaders (use PyG ProteinLigandDataLoader)
     train_loader = None
     test_loader = None
     
     if train_subset is not None:
         train_sampler = SubsetRandomSampler(train_subset.indices)
-        train_loader = DataLoader(
+        train_loader = ProteinLigandDataLoader(
             dataset,
             batch_size=batch_size,
             sampler=train_sampler,
             num_workers=num_workers,
-            collate_fn=collate_fn,
             pin_memory=True
         )
     
     if test_subset is not None:
         test_sampler = SubsetRandomSampler(test_subset.indices)
-        test_loader = DataLoader(
+        test_loader = ProteinLigandDataLoader(
             dataset,
             batch_size=batch_size,
             sampler=test_sampler,
             num_workers=num_workers,
-            collate_fn=collate_fn,
             pin_memory=True
         )
     

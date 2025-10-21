@@ -6,6 +6,12 @@ import torch
 from torch_geometric.data import Data, Batch
 from .utils import ProteinLigandData
 
+# Helper: safe tensor conversion without copy-construct warnings
+def _to_tensor(value, dtype=None):
+    if isinstance(value, torch.Tensor):
+        return value.to(dtype=dtype) if dtype is not None else value
+    return torch.as_tensor(value, dtype=dtype) if dtype is not None else torch.as_tensor(value)
+
 
 class CrossDockedDataset:
     
@@ -23,8 +29,10 @@ class CrossDockedDataset:
         # Find LMDB and name2id files
         self.lmdb_path, self.name2id_path = self._find_lmdb_and_name2id_files()
         
-        # Initialize database connection
+        # Initialize database connection (deferred to avoid pickling LMDB env)
         self.db = None
+        # Optional cached read-only transaction (created per-process)
+        self._txn = None
         self.keys = []
         self.name2id = {}
         
@@ -108,11 +116,27 @@ class CrossDockedDataset:
             )
             with self.db.begin() as txn:
                 self.keys = [key.decode() for key in txn.cursor().iternext(values=False)]
+            # Reset per-process txn
+            self._txn = None
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Drop unpicklable LMDB handles when sending to workers
+        state['db'] = None
+        state['_txn'] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Ensure handles are None; will reconnect in worker on first access
+        self.db = None
+        self._txn = None
     
     def _load_name2id(self):
         """Load name2id mapping"""
         if os.path.exists(self.name2id_path):
-            self.name2id = torch.load(self.name2id_path)
+            # Silence FutureWarning by explicitly setting weights_only
+            self.name2id = torch.load(self.name2id_path, weights_only=True)
         else:
             raise FileNotFoundError(f"name2id file not found: {self.name2id_path}")
     
@@ -121,7 +145,7 @@ class CrossDockedDataset:
         split_file = os.path.join(self.processed_dir, 'split_by_name.pt')
         
         if os.path.exists(split_file):
-            split_data = torch.load(split_file)
+            split_data = torch.load(split_file, weights_only=True)
             
             if isinstance(split_data, dict):
                 train_list = split_data.get('train', [])
@@ -205,41 +229,49 @@ class CrossDockedDataset:
             key = self.keys[idx]
             if isinstance(key, str):
                 key = key.encode()
-            raw_data = pickle.loads(self.db.begin().get(key))
+            with self.db.begin(buffers=True) as txn:
+                raw = txn.get(key)
+            raw_data = pickle.loads(bytes(raw)) if raw is not None else None
+            if raw_data is None:
+                return None
             
             # Convert to ProteinLigandData object
             data = ProteinLigandData()
             
-            # Protein data
-            if 'protein_pos' in raw_data:
-                data.protein_pos = torch.tensor(raw_data['protein_pos'], dtype=torch.float32)
+            # Helper to pick first existing key from a list of candidates
+            def _first_key(dct, candidates):
+                for k in candidates:
+                    if k in dct:
+                        return k
+                return None
+            
+            # Protein data (robust key mapping)
+            prot_pos_key = _first_key(raw_data, ['protein_pos', 'protein_context_pos', 'protein_coords', 'protein_position'])
+            if prot_pos_key is not None:
+                data.protein_pos = _to_tensor(raw_data[prot_pos_key], dtype=torch.float32)
             if 'protein_atom_feature' in raw_data:
-                data.protein_atom_feature = torch.tensor(raw_data['protein_atom_feature'], dtype=torch.float32)
+                data.protein_atom_feature = _to_tensor(raw_data['protein_atom_feature'], dtype=torch.float32)
             if 'protein_atom_name' in raw_data:
                 data.protein_atom_name = raw_data['protein_atom_name']
             if 'protein_atom_to_aa_type' in raw_data:
-                data.protein_atom_to_aa_type = torch.tensor(raw_data['protein_atom_to_aa_type'], dtype=torch.long)
+                data.protein_atom_to_aa_type = _to_tensor(raw_data['protein_atom_to_aa_type'], dtype=torch.long)
             
-            # Ligand data
             if 'ligand_pos' in raw_data:
-                data.ligand_pos = torch.tensor(raw_data['ligand_pos'], dtype=torch.float32)
+                data.ligand_pos = _to_tensor(raw_data['ligand_pos'], dtype=torch.float32)
+            elif 'ligand_context_pos' in raw_data:
+                data.ligand_pos = _to_tensor(raw_data['ligand_context_pos'], dtype=torch.float32)
             if 'ligand_bond_type' in raw_data:
-                data.ligand_bond_type = torch.tensor(raw_data['ligand_bond_type'], dtype=torch.long)
+                data.ligand_bond_type = _to_tensor(raw_data['ligand_bond_type'], dtype=torch.long)
             if 'ligand_atom_feature' in raw_data:
-                data.ligand_atom_feature = torch.tensor(raw_data['ligand_atom_feature'], dtype=torch.float32)
+                data.ligand_atom_feature = _to_tensor(raw_data['ligand_atom_feature'], dtype=torch.float32)
+            elif 'ligand_context_feature' in raw_data:
+                data.ligand_atom_feature = _to_tensor(raw_data['ligand_context_feature'], dtype=torch.float32)
             if 'ligand_bond_index' in raw_data:
-                data.ligand_bond_index = torch.tensor(raw_data['ligand_bond_index'], dtype=torch.long)
-            
-            # Other attributes
-            if 'ligand_context_pos' in raw_data:
-                data.ligand_context_pos = torch.tensor(raw_data['ligand_context_pos'], dtype=torch.float32)
-            if 'ligand_context_feature' in raw_data:
-                data.ligand_context_feature = torch.tensor(raw_data['ligand_context_feature'], dtype=torch.float32)
-            if 'ligand_context_bond_index' in raw_data:
-                data.ligand_context_bond_index = torch.tensor(raw_data['ligand_context_bond_index'], dtype=torch.long)
-            if 'ligand_context_bond_type' in raw_data:
-                data.ligand_context_bond_type = torch.tensor(raw_data['ligand_context_bond_type'], dtype=torch.long)
-            
+                data.ligand_bond_index = _to_tensor(raw_data['ligand_bond_index'], dtype=torch.long)
+            # Essential guard: ensure ligand_pos 存在，否则丢弃该样本
+            if not hasattr(data, 'ligand_pos') or data.ligand_pos is None:
+                return None
+
             return data
             
         except Exception as e:
@@ -272,8 +304,9 @@ class PDBBindDataset:
         # Find LMDB and name2id files
         self.lmdb_path, self.name2id_path = self._find_lmdb_and_name2id_files()
         
-        # Initialize database connection
+        # Initialize database connection (deferred to avoid pickling LMDB env)
         self.db = None
+        self._txn = None
         self.keys = []
         self.name2id = {}
         
@@ -356,6 +389,18 @@ class PDBBindDataset:
             )
             with self.db.begin() as txn:
                 self.keys = [key.decode() for key in txn.cursor().iternext(values=False)]
+            self._txn = None
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['db'] = None
+        state['_txn'] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.db = None
+        self._txn = None
     
     def _load_name2id(self):
         """Load name2id mapping"""
@@ -369,7 +414,7 @@ class PDBBindDataset:
         split_file = os.path.join(self.processed_dir, 'split_by_name.pt')
         
         if os.path.exists(split_file):
-            split_data = torch.load(split_file)
+            split_data = torch.load(split_file, weights_only=True)
             
             if isinstance(split_data, dict):
                 train_list = split_data.get('train', [])
@@ -442,7 +487,6 @@ class PDBBindDataset:
             return len(self.keys)
     
     def _get_single_item(self, idx: Union[int, List, Tuple]) -> Optional[ProteinLigandData]:
-        """Get single data item"""
         if self.db is None:
             self._connect_db()
         
@@ -453,41 +497,61 @@ class PDBBindDataset:
             key = self.keys[idx]
             if isinstance(key, str):
                 key = key.encode()
-            raw_data = pickle.loads(self.db.begin().get(key))
+            with self.db.begin(buffers=True) as txn:
+                raw = txn.get(key)
+            raw_data = pickle.loads(bytes(raw)) if raw is not None else None
+            if raw_data is None:
+                return None
             
             # Convert to ProteinLigandData object
             data = ProteinLigandData()
             
-            # Protein data
-            if 'protein_pos' in raw_data:
-                data.protein_pos = torch.tensor(raw_data['protein_pos'], dtype=torch.float32)
+            # Helper to pick first existing key from candidates
+            def _first_key(dct, candidates):
+                for k in candidates:
+                    if k in dct:
+                        return k
+                return None
+            
+            # Protein data (robust key mapping)
+            prot_pos_key = _first_key(raw_data, ['protein_pos', 'protein_context_pos', 'protein_coords', 'protein_position'])
+            if prot_pos_key is not None:
+                data.protein_pos = _to_tensor(raw_data[prot_pos_key], dtype=torch.float32)
             if 'protein_atom_feature' in raw_data:
-                data.protein_atom_feature = torch.tensor(raw_data['protein_atom_feature'], dtype=torch.float32)
+                data.protein_atom_feature = _to_tensor(raw_data['protein_atom_feature'], dtype=torch.float32)
             if 'protein_atom_name' in raw_data:
                 data.protein_atom_name = raw_data['protein_atom_name']
             if 'protein_atom_to_aa_type' in raw_data:
-                data.protein_atom_to_aa_type = torch.tensor(raw_data['protein_atom_to_aa_type'], dtype=torch.long)
+                data.protein_atom_to_aa_type = _to_tensor(raw_data['protein_atom_to_aa_type'], dtype=torch.long)
             
-            # Ligand data
-            if 'ligand_pos' in raw_data:
-                data.ligand_pos = torch.tensor(raw_data['ligand_pos'], dtype=torch.float32)
+            # Ligand data (robust key mapping)
+            lig_pos_key = _first_key(raw_data, ['ligand_pos', 'ligand_context_pos', 'ligand_coords', 'ligand_position'])
+            if lig_pos_key is not None:
+                data.ligand_pos = _to_tensor(raw_data[lig_pos_key], dtype=torch.float32)
             if 'ligand_bond_type' in raw_data:
-                data.ligand_bond_type = torch.tensor(raw_data['ligand_bond_type'], dtype=torch.long)
-            if 'ligand_atom_feature' in raw_data:
-                data.ligand_atom_feature = torch.tensor(raw_data['ligand_atom_feature'], dtype=torch.float32)
+                data.ligand_bond_type = _to_tensor(raw_data['ligand_bond_type'], dtype=torch.long)
+            lig_feat_key = _first_key(raw_data, ['ligand_atom_feature', 'ligand_context_feature'])
+            if lig_feat_key is not None:
+                data.ligand_atom_feature = _to_tensor(raw_data[lig_feat_key], dtype=torch.float32)
             if 'ligand_bond_index' in raw_data:
-                data.ligand_bond_index = torch.tensor(raw_data['ligand_bond_index'], dtype=torch.long)
+                data.ligand_bond_index = _to_tensor(raw_data['ligand_bond_index'], dtype=torch.long)
             
-            # Other attributes
-            if 'ligand_context_pos' in raw_data:
-                data.ligand_context_pos = torch.tensor(raw_data['ligand_context_pos'], dtype=torch.float32)
-            if 'ligand_context_feature' in raw_data:
-                data.ligand_context_feature = torch.tensor(raw_data['ligand_context_feature'], dtype=torch.float32)
+            # Other attributes (keep if present)
+            ctx_pos_key = _first_key(raw_data, ['ligand_context_pos'])
+            if ctx_pos_key is not None:
+                data.ligand_context_pos = _to_tensor(raw_data[ctx_pos_key], dtype=torch.float32)
+            ctx_feat_key = _first_key(raw_data, ['ligand_context_feature'])
+            if ctx_feat_key is not None:
+                data.ligand_context_feature = _to_tensor(raw_data[ctx_feat_key], dtype=torch.float32)
             if 'ligand_context_bond_index' in raw_data:
-                data.ligand_context_bond_index = torch.tensor(raw_data['ligand_context_bond_index'], dtype=torch.long)
+                data.ligand_context_bond_index = _to_tensor(raw_data['ligand_context_bond_index'], dtype=torch.long)
             if 'ligand_context_bond_type' in raw_data:
-                data.ligand_context_bond_type = torch.tensor(raw_data['ligand_context_bond_type'], dtype=torch.long)
-            
+                data.ligand_context_bond_type = _to_tensor(raw_data['ligand_context_bond_type'], dtype=torch.long)
+
+            # Essential guard: ensure ligand_pos 存在，否则丢弃该样本
+            if not hasattr(data, 'ligand_pos') or data.ligand_pos is None:
+                return None
+
             return data
             
         except Exception as e:

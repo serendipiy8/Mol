@@ -27,7 +27,8 @@ BOND_NAMES = {v: str(k) for k, v in BOND_TYPES.items()}
 HYBRIDIZATION_TYPE = ['S', 'SP', 'SP2', 'SP3', 'SP3D', 'SP3D2']
 HYBRIDIZATION_TYPE_ID = {s: i for i, s in enumerate(HYBRIDIZATION_TYPE)}
 
-FOLLOW_BATCH = ('protein_element', 'ligand_element', 'ligand_decomp_centers', 'ligand_fc_bond_type')
+# 仅在确实需要时启用 follow_batch；默认置空以避免缺失字段引发装配错误
+FOLLOW_BATCH = tuple()
 
 def convert_sdf_to_pdb(sdf_path, pdb_path):
     obConversion = ob.OBConversion()
@@ -278,19 +279,40 @@ class ProteinLigandData(Data):
 
     def __inc__(self, key, value, *args, **kwargs):
         if key == 'ligand_bond_index':
-            return self['ligand_element'].size(0)
+            if hasattr(self, 'ligand_pos') and self.ligand_pos is not None:
+                return self.ligand_pos.size(0)
         elif key == 'ligand_context_bond_index':
-            return self['ligand_context_element'].size(0)
+            if hasattr(self, 'ligand_context_pos') and self.ligand_context_pos is not None:
+                return self.ligand_context_pos.size(0)
         elif key == 'mask_ctx_edge_index_0':
-            return self['ligand_masked_element'].size(0)
+            if hasattr(self, 'ligand_masked_pos') and self.ligand_masked_pos is not None:
+                return self.ligand_masked_pos.size(0)
         elif key == 'mask_ctx_edge_index_1':
-            return self['ligand_context_element'].size(0)
+            if hasattr(self, 'ligand_context_pos') and self.ligand_context_pos is not None:
+                return self.ligand_context_pos.size(0)
         elif key == 'mask_compose_edge_index_0':
-            return self['ligand_masked_element'].size(0)
+            if hasattr(self, 'ligand_masked_pos') and self.ligand_masked_pos is not None:
+                return self.ligand_masked_pos.size(0)
         elif key == 'mask_compose_edge_index_1':
-            return self['ligand_context_element'].size(0)
-        else:
-            return super().__inc__(key, value)
+            if hasattr(self, 'ligand_context_pos') and self.ligand_context_pos is not None:
+                return self.ligand_context_pos.size(0)
+        return super().__inc__(key, value)
+
+    def __cat_dim__(self, key, value, *args, **kwargs):
+        # Edge indices are concatenated along dim=1; node-level tensors along dim=0
+        if key in (
+            'ligand_bond_index',
+            'ligand_context_bond_index',
+            'mask_ctx_edge_index_0',
+            'mask_ctx_edge_index_1',
+            'mask_compose_edge_index_0',
+            'mask_compose_edge_index_1',
+            'protein_protein_edges',
+            'ligand_ligand_edges',
+            'cross_edges',
+        ):
+            return 1
+        return 0
 
 class ProteinLigandDataLoader(DataLoader):
 

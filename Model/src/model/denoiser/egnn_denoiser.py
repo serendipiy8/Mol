@@ -185,3 +185,4 @@ class EGNNDenoiser(nn.Module):
         h0_pred = self.out_feat(x)
 
         return x0_pred, h0_pred
+

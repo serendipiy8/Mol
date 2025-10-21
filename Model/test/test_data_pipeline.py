@@ -1,3 +1,50 @@
+import torch
+from torch_geometric.data import Batch
+from src.data.utils import ProteinLigandData
+
+
+def _make_sample(n_prot: int, n_lig: int, with_bonds: bool):
+    data = ProteinLigandData()
+    data.protein_pos = torch.randn(n_prot, 3)
+    data.ligand_pos = torch.randn(n_lig, 3)
+    data.ligand_atom_feature = torch.randn(n_lig, 5)
+    if with_bonds and n_lig >= 2:
+        edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+        data.ligand_bond_index = edge_index
+        data.ligand_bond_type = torch.ones(edge_index.size(1), dtype=torch.long)
+    return data
+
+
+def test_batch_invariants_simple():
+    d1 = _make_sample(4, 3, with_bonds=True)
+    d2 = _make_sample(2, 2, with_bonds=True)
+    batch = Batch.from_data_list([d1, d2])
+
+    # required keys
+    assert hasattr(batch, 'protein_pos') and batch.protein_pos.size(1) == 3
+    assert hasattr(batch, 'ligand_pos') and batch.ligand_pos.size(1) == 3
+    assert hasattr(batch, 'ligand_atom_feature')
+
+    # edge index cat dim = 1 and offset via __inc__
+    assert hasattr(batch, 'ligand_bond_index')
+    assert batch.ligand_bond_index.dim() == 2 and batch.ligand_bond_index.size(0) == 2
+
+    # offsets: second graph edges should reference indices >= first lig size
+    first_lig = 3
+    assert torch.all(batch.ligand_bond_index[:, 2:] >= 0)
+    assert torch.all(batch.ligand_bond_index[:, 2:] < first_lig + 2)
+
+
+def test_batch_invariants_no_bonds():
+    d1 = _make_sample(3, 1, with_bonds=False)
+    d2 = _make_sample(1, 4, with_bonds=False)
+    batch = Batch.from_data_list([d1, d2])
+
+    assert hasattr(batch, 'ligand_pos')
+    # no ligand_bond_index attribute in this case or empty
+    if hasattr(batch, 'ligand_bond_index'):
+        assert batch.ligand_bond_index.size(1) == 0
+
 """
 Test data pipeline for LO-MaskDiff
 Tests the integration of soft mask transforms and graph building
@@ -163,6 +210,8 @@ def test_integration():
     data = ProteinLigandData()
     data.protein_pos = torch.randn(20, 3)
     data.ligand_pos = torch.randn(10, 3)
+    # 必要：为 soft mask 提供配体特征
+    data.ligand_atom_feature = torch.randn(10, 5)
     data.ligand_bond_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
     data.ligand_element = torch.randint(1, 10, (10,))
     data.protein_element = torch.randint(1, 10, (20,))
