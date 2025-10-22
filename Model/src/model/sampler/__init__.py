@@ -1,9 +1,7 @@
-"""
-Legacy compatibility: re-export sampling from model.sampling.
-Prefer importing from `model.sampling` going forward.
-"""
-from ..sampling import *
+from .conditional_sampler import ConditionalSampler
+from .proposer import Proposer
+from .sampler import sample_multi_modal
 
-__all__ = [name for name in dir() if not name.startswith('_')]
+__all__ = ['ConditionalSampler', 'Proposer', 'sample_multi_modal']
 
 # Sampling modules for generation

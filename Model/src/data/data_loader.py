@@ -122,6 +122,18 @@ def get_data_loaders(dataset_path, split_file=None, batch_size=32, num_workers=0
                 worker_init_fn=worker_init_reconnect_db,
                 collate_fn=collate_fn_protein_ligand
             )
+    else:
+        train_loader = ProteinLigandDataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle_train,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=True if num_workers and num_workers > 0 else False,
+            prefetch_factor=2 if num_workers and num_workers > 0 else None,
+            worker_init_fn=worker_init_reconnect_db,
+            collate_fn=collate_fn_protein_ligand
+        )
     
     if test_subset is not None:
         if hasattr(test_subset, 'indices') and len(test_subset.indices) == 0:

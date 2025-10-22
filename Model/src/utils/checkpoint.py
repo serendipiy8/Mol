@@ -1,1 +1,0 @@
-# Model checkpointing utilities

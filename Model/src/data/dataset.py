@@ -589,7 +589,7 @@ def get_model_dataset(config):
     
     # Handle split
     if split_file and os.path.exists(split_file):
-        split_data = torch.load(split_file)
+        split_data = torch.load(split_file, weights_only=True)
         
         if isinstance(split_data, dict):
             train_list = split_data.get('train', [])

@@ -15,9 +15,9 @@ class SoftMaskDiffusionProcess:
     def __init__(self, num_steps: int = 1000, sigma_min: float = 0.5,
                  sigma_max: float = 1.0, sigma_schedule: str = 'linear', device: str = 'cuda',
                  bind_sigma_to_alpha: bool = False, alpha_schedule: str = 'linear'):
+
         self.num_steps = num_steps
         self.device = device
-        # Optional sigma-alpha binding
         self.alpha_values = None
         if bind_sigma_to_alpha:
             self.alpha_values = build_alpha_schedule(num_steps=self.num_steps, schedule=alpha_schedule, device=device)
@@ -168,7 +168,7 @@ class SoftMaskDiffusionProcess:
     
     def sample(self, model, shape: Tuple[int, int], tau: torch.Tensor,
                soft_mask_transform, num_steps: Optional[int] = None, guidance_scale: float = 1.0,
-               batch_context: Optional[Data] = None) -> torch.Tensor:
+               batch_context: Optional[Data] = None, init_x: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Sample from the diffusion process
         
@@ -187,8 +187,11 @@ class SoftMaskDiffusionProcess:
         if num_steps is None:
             num_steps = self.num_steps
         
-        # Start from pure noise
-        x = torch.randn(shape, device=self.device)
+        # Start from init or pure noise
+        if init_x is not None:
+            x = init_x.to(self.device)
+        else:
+            x = torch.randn(shape, device=self.device)
         
         # Reverse sampling using soft-mask updates
         for i in reversed(range(num_steps)):
@@ -218,13 +221,14 @@ class SoftMaskDiffusionProcess:
     
     def sample_multi_modal(self, model, shape_coord: Tuple[int, int], shape_feat: Tuple[int, int],
                            tau: torch.Tensor, soft_mask_transform, num_steps: Optional[int] = None,
-                           guidance_scale: float = 1.0, batch_context: Optional[Data] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+                           guidance_scale: float = 1.0, batch_context: Optional[Data] = None,
+                           init_x: Optional[torch.Tensor] = None, init_h: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
 
         if num_steps is None:
             num_steps = self.num_steps
 
-        x = torch.randn(shape_coord, device=self.device)
-        h = torch.randn(shape_feat, device=self.device)
+        x = init_x.to(self.device) if init_x is not None else torch.randn(shape_coord, device=self.device)
+        h = init_h.to(self.device) if init_h is not None else torch.randn(shape_feat, device=self.device)
 
         for i in reversed(range(num_steps)):
             t = torch.tensor(i, device=self.device)
