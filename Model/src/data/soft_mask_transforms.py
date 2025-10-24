@@ -237,13 +237,12 @@ class LogisticNormalReparameterization:
         Returns:
             kl_div: KL divergence [N_nodes]
         """
-        # ensure prior params are tensors on the same device/dtype
+
         prior_mu_t = torch.tensor(prior_mu, device=mu.device, dtype=mu.dtype)
         prior_sigma_t = torch.tensor(prior_sigma, device=mu.device, dtype=mu.dtype)
 
         sigma = torch.exp(torch.clamp(log_sigma, min=-10, max=10))
 
-        # KL divergence for normal distributions (element-wise)
         kl_div = 0.5 * (
             (sigma / prior_sigma_t) ** 2 +
             ((mu - prior_mu_t) / prior_sigma_t) ** 2 -

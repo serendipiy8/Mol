@@ -97,24 +97,68 @@ class ConditionalSampler:
 
     @staticmethod
     def _map_classes_to_elements(class_ids: torch.Tensor) -> List[str]:
-        # Map class index to atomic number then to symbol
-        # Default palette: [H,C,N,O,F,P,S,Cl,Br,I]
-        palette = [1, 6, 7, 8, 9, 15, 16, 17, 35, 53]
+
+    # Safe palette: H, C, N, O, F, P, S, Cl, Br, I
+        palette_safe = [1, 6, 7, 8, 9, 15, 16, 17, 35, 53]
         try:
             from rdkit import Chem
             pt = Chem.GetPeriodicTable()
             syms = []
             for c in class_ids.detach().cpu().long().tolist():
-                z = palette[c % len(palette)]
+                # Clamp to valid palette range
+                idx = max(0, min(c, len(palette_safe) - 1))
+                z = palette_safe[idx]
                 syms.append(pt.GetElementSymbol(int(z)))
             return syms
         except Exception:
+            # Fallback mapping
             mapping = {1: 'H', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 15: 'P', 16: 'S', 17: 'Cl', 35: 'Br', 53: 'I'}
             out = []
             for c in class_ids.detach().cpu().long().tolist():
-                z = palette[c % len(palette)]
+                idx = max(0, min(c, len(palette_safe) - 1))
+                z = palette_safe[idx]
                 out.append(mapping.get(int(z), 'C'))
             return out
+
+    @staticmethod
+    def _guess_bonds_by_distance(elements: List[str], coords_np, scale: float = 1.15):
+        radii = {
+            'H': 0.31, 'C': 0.76, 'N': 0.71, 'O': 0.66, 'F': 0.57,
+            'P': 1.07, 'S': 1.05, 'Cl': 1.02, 'Br': 1.20, 'I': 1.39
+        }
+        max_deg = {'H': 1, 'C': 4, 'N': 3, 'O': 2, 'F': 1, 'P': 5, 'S': 6, 'Cl': 1, 'Br': 1, 'I': 1}
+        import numpy as np
+        coords = np.asarray(coords_np, dtype=float)
+        N = len(elements)
+        if N <= 1:
+            return None
+        # build all candidate pairs with distance
+        cand = []
+        for i in range(N):
+            ri = radii.get(elements[i], 0.8)
+            for j in range(i + 1, N):
+                rj = radii.get(elements[j], 0.8)
+                cutoff = scale * (ri + rj)
+                dij = float(np.linalg.norm(coords[i] - coords[j]))
+                if 0.1 < dij <= cutoff:
+                    cand.append((dij, i, j))
+        if not cand:
+            return None
+        cand.sort(key=lambda x: x[0])
+        deg = [0] * N
+        pairs = []
+        for _, i, j in cand:
+            if deg[i] >= max_deg.get(elements[i], 4):
+                continue
+            if deg[j] >= max_deg.get(elements[j], 4):
+                continue
+            pairs.append((i, j))
+            deg[i] += 1
+            deg[j] += 1
+        if not pairs:
+            return None
+        ei = torch.tensor([[a for a, b in pairs], [b for a, b in pairs]], dtype=torch.long)
+        return ei
 
     @staticmethod
     def _prune_by_valence(edge_index: torch.Tensor, edge_type: torch.Tensor, elements: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -173,11 +217,10 @@ class ConditionalSampler:
 
     @torch.no_grad()
     def sample_once(self, model, batch: Data, use_multi_modal: bool = False) -> torch.Tensor:
-        # unwrap possible dict/list wrappers
         batch = self._unwrap(batch)
-        # infer shapes
         n_atoms = self._infer_num_ligand_atoms(batch)
-        tau = self._predict_tau(model, batch, n_atoms)
+        print("DEBUG sample_once -> n_atoms:", n_atoms)
+        tau = torch.full((n_atoms,), 0.5, device=self.device)
 
         # generate coordinates (and optional features)
         # auto-enable multi-modal if model expects h_t
@@ -220,7 +263,6 @@ class ConditionalSampler:
         os.makedirs(out_dir, exist_ok=True)
         sdf_paths: List[str] = []
 
-        # unwrap and ensure batch on device
         batch = self._unwrap(batch)
         for name in ('protein_pos', 'protein_atom_feature', 'ligand_pos', 'ligand_atom_feature', 'ligand_element', 'protein_element'):
             val = getattr(batch, name, None)
@@ -229,55 +271,17 @@ class ConditionalSampler:
 
         n_atoms = self._infer_num_ligand_atoms(batch)
         elements = self._infer_elements(batch, n_atoms)
-
-        def _build_mol_with_pred_bonds(sym_list: List[str], coords_np, h_feat: Optional[torch.Tensor]):
-            if not RDKit_AVAILABLE:
-                return build_rdkit_mol_from_coords(sym_list, coords_np)
-            # Try to predict bonds using model's internal head if available and features provided
-            edge_index_pred = None
-            if hasattr(model, '_predict_bonds') and isinstance(h_feat, torch.Tensor):
-                try:
-                    ei, logits = model._predict_bonds(h_feat.to(self.device), torch.as_tensor(coords_np, device=self.device, dtype=h_feat.dtype))
-                    if isinstance(ei, torch.Tensor) and ei.numel() > 0 and isinstance(logits, torch.Tensor):
-                        keep = torch.argmax(logits, dim=-1) == 1
-                        ei = ei[:, keep]
-                        edge_index_pred = ei.detach().cpu()
-                except Exception:
-                    edge_index_pred = None
-            # Build RDKit molecule
-            from rdkit import Chem
-            rw = Chem.RWMol()
-            for sym in sym_list:
-                rw.AddAtom(Chem.Atom(sym))
-            mol = rw.GetMol()
-            conf = Chem.Conformer(len(sym_list))
-            for idx, pos in enumerate(coords_np):
-                conf.SetAtomPosition(idx, Chem.rdGeometry.Point3D(float(pos[0]), float(pos[1]), float(pos[2])))
-            mol.RemoveAllConformers()
-            mol.AddConformer(conf, assignId=True)
-            # Add bonds as SINGLE if predicted
-            if edge_index_pred is not None and edge_index_pred.numel() > 0:
-                rw = Chem.RWMol(mol)
-                src = edge_index_pred[0].tolist()
-                dst = edge_index_pred[1].tolist()
-                for a, b in zip(src, dst):
-                    try:
-                        rw.AddBond(int(a), int(b), Chem.BondType.SINGLE)
-                    except Exception:
-                        continue
-                mol = rw.GetMol()
-            return mol
+        print("DEBUG sample_and_write -> n_atoms:", n_atoms)
+        print("DEBUG sample_and_write -> initial elements:", elements)
 
         for i in range(num_samples):
-            # If multi-modal path, also get features for bond prediction
             h_last = None
             if use_multi_modal:
-                # re-sample tau for each sample
-                tau = self._predict_tau(model, batch, n_atoms)
+                tau = torch.full((n_atoms,), 0.5, device=self.device)
                 x0, h_last = self.diffusion_process.sample_multi_modal(
                     model=model,
                     shape_coord=(n_atoms, 3),
-                    shape_feat=(n_atoms, int(model.out_feat.out_features) if hasattr(model, 'out_feat') else int(getattr(model, 'hidden_dim', 64))),
+                    shape_feat=(n_atoms, getattr(model, 'hidden_dim', 64)),
                     tau=tau,
                     soft_mask_transform=self.soft_mask_transform,
                     batch_context=batch,
@@ -285,52 +289,24 @@ class ConditionalSampler:
             else:
                 x0 = self.sample_once(model, batch, use_multi_modal=False)
             coords = x0.detach().cpu().numpy()
+            print(f"DEBUG sample_and_write -> sample {i} coords shape:", coords.shape)
 
-            # decode element types if model provided logits
-            pred_atom_logits = getattr(batch, 'pred_atom_type_logits', None)
-            if isinstance(pred_atom_logits, torch.Tensor) and pred_atom_logits.size(0) == n_atoms:
-                elements = self._map_classes_to_elements(pred_atom_logits.argmax(dim=-1))
+            if use_multi_modal and h_last is not None and hasattr(model, 'atom_type_head'):
+                logits = model.atom_type_head(h_last.to(self.device))
+                print("DEBUG sample_and_write -> atom_type_head logits shape:", logits.shape)
+                if logits.size(0) != n_atoms:
+                    print("WARNING: logits batch size does not match n_atoms")
+                elements = self._map_classes_to_elements(logits.argmax(dim=-1))
 
-            # decode multi-class bonds if available
-            pred_edge_index = getattr(batch, 'pred_bond_index', None)
-            pred_bond_logits = getattr(batch, 'pred_bond_logits', None)
-            if isinstance(pred_edge_index, torch.Tensor) and isinstance(pred_bond_logits, torch.Tensor) and pred_edge_index.numel() > 0:
-                edge_type = pred_bond_logits.argmax(dim=-1)
-                # prune by valence (optional)
-                pred_ei, edge_type = self._prune_by_valence(pred_edge_index.detach().cpu(), edge_type.detach().cpu(), elements)
-                # build RDKit mol with multi-class bonds
-                try:
-                    from rdkit import Chem
-                    rw = Chem.RWMol()
-                    for sym in elements:
-                        rw.AddAtom(Chem.Atom(sym))
-                    for k in range(pred_ei.size(1)):
-                        a = int(pred_ei[0, k].item())
-                        b = int(pred_ei[1, k].item())
-                        t = int(edge_type[k].item())
-                        bt = Chem.BondType.SINGLE if t == 1 else Chem.BondType.DOUBLE if t == 2 else Chem.BondType.TRIPLE if t == 3 else Chem.BondType.AROMATIC if t == 4 else Chem.BondType.SINGLE
-                        try:
-                            rw.AddBond(a, b, bt)
-                        except Exception:
-                            continue
-                    mol = rw.GetMol()
-                    conf = Chem.Conformer(len(elements))
-                    for idx, pos in enumerate(coords):
-                        conf.SetAtomPosition(idx, Chem.rdGeometry.Point3D(float(pos[0]), float(pos[1]), float(pos[2])))
-                    mol.RemoveAllConformers()
-                    mol.AddConformer(conf, assignId=True)
-                    try:
-                        Chem.SanitizeMol(mol)
-                    except Exception:
-                        pass
-                except Exception:
-                    mol = _build_mol_with_pred_bonds(elements, coords, h_last)
-            else:
-                mol = _build_mol_with_pred_bonds(elements, coords, h_last)
             sdf_path = os.path.join(out_dir, f"{prefix}_{i:05d}.sdf")
+            from rdkit import Chem
+            mol = build_rdkit_mol_from_coords(elements, coords)
+            try:
+                Chem.SanitizeMol(mol)
+            except Exception as e:
+                print("WARNING: SanitizeMol failed:", e)
             write_rdkit_mol_sdf(mol, sdf_path)
             sdf_paths.append(sdf_path)
-
         return sdf_paths
 
     @torch.no_grad()

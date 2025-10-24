@@ -45,9 +45,10 @@ class DiffusionLoss:
     def compute_loss_multi_modal(self, x0_coord: torch.Tensor, x0_pred: torch.Tensor,
                                  h0_feat: torch.Tensor, h0_pred: torch.Tensor,
                                  s_t: torch.Tensor, sigma_coord: torch.Tensor,
-                                 sigma_feat: torch.Tensor, lambda_feat: float = 1.0) -> torch.Tensor:
+                                 sigma_feat: torch.Tensor, lambda_feat: float = 100) -> torch.Tensor:
         loss_coord = self.compute_loss(x0_coord, x0_pred, s_t, sigma_coord)
         loss_feat = self.compute_loss(h0_feat, h0_pred, s_t, sigma_feat)
+        print(f"loss_coord: {loss_coord}, loss_feat: {loss_feat}")
         return loss_coord + lambda_feat * loss_feat
 
     def compute_kl_loss(self, mu: torch.Tensor, log_sigma: torch.Tensor,

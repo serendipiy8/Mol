@@ -18,7 +18,9 @@ class DiffusionTrainer:
                  lambda_eps: float = 0.0,
                  lambda_tau_smooth: float = 0.0,
                  lambda_tau_rank: float = 0.0,
-                 lambda_atom_type: float = 0.0):
+                 lambda_atom_type: float = 0.0,
+                 lambda_bond: float = 0.1,
+                 debug_atom_type: bool = False):
 
         self.diffusion_process = diffusion_process
         self.loss_fn = loss_fn
@@ -35,6 +37,43 @@ class DiffusionTrainer:
         self.lambda_tau_smooth = float(lambda_tau_smooth)
         self.lambda_tau_rank = float(lambda_tau_rank)
         self.lambda_atom_type = float(lambda_atom_type)
+        self.lambda_bond = float(lambda_bond)
+        self.debug_atom_type = bool(debug_atom_type)
+        self._dbg_counter = 0
+
+    @staticmethod
+    def _infer_element_labels_from_feat(feat: torch.Tensor) -> Optional[torch.Tensor]:
+        """Infer atomic numbers by scanning feature columns and selecting the most plausible Z column.
+        Returns long tensor or None if unreliable.
+        """
+        try:
+            if not isinstance(feat, torch.Tensor) or feat.ndim != 2 or feat.size(1) < 1:
+                return None
+            palette = torch.tensor([1, 6, 7, 8, 9, 15, 16, 17, 35, 53], dtype=torch.long)
+            best_ratio = 0.0
+            best_col = None
+            for j in range(int(feat.size(1))):
+                col = feat[:, j].detach().cpu().to(torch.float32)
+                col_int = torch.round(col).to(torch.long)
+                if (col - col_int.to(col.dtype)).abs().mean().item() > 0.05:
+                    continue
+                if col_int.numel() == 0:
+                    continue
+                vmin = int(col_int.min().item())
+                vmax = int(col_int.max().item())
+                uniq = torch.unique(col_int)
+                if vmin < 1 or vmax > 53 or uniq.numel() < 3:
+                    continue
+                isin = (col_int.unsqueeze(-1) == palette.unsqueeze(0)).any(dim=-1)
+                ratio = float(isin.float().mean().item())
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_col = col_int
+            if best_col is not None and best_ratio >= 0.6:
+                return best_col
+            return None
+        except Exception:
+            return None
 
     def _build_radius_edges(self, pos: torch.Tensor, radius: float) -> torch.Tensor:
         """Naive radius graph (cpu/gpu), returns edge_index [2, E]."""
@@ -135,6 +174,21 @@ class DiffusionTrainer:
                 pass
 
         return g_P, h_lig
+
+    def _unwrap_batch(self, batch):
+        if isinstance(batch, dict):
+            for k in ('data', 'batch'):
+                if k in batch and batch[k] is not None:
+                    return batch[k]
+            for v in batch.values():
+                if v is not None:
+                    return v
+            return batch
+        if isinstance(batch, (list, tuple)):
+            for it in batch:
+                if it is not None:
+                    return it
+        return batch
 
     def _assert_batch(self, batch: Data) -> None:
         ligand_pos = self._get_field(batch, 'ligand_pos')
@@ -320,7 +374,7 @@ class DiffusionTrainer:
                 raise ValueError('h0_pred device must match h0 device')
 
     def training_step(self, batch: Data, model, soft_mask_transform) -> Dict[str, float]:
-        
+
         batch = self._unwrap_batch(batch)
         self._ensure_fields(batch)
         self._assert_batch(batch)
@@ -328,6 +382,18 @@ class DiffusionTrainer:
         if x0_field is None:
             raise ValueError('Batch must contain ligand_pos tensor')
         x0 = x0_field.to(self.device)
+
+        # Debug: report key presence and shapes once per few steps
+        if self.debug_atom_type:
+            try:
+                lig_feat_dbg = self._get_field(batch, 'ligand_atom_feature')
+                lig_el_dbg = self._get_field(batch, 'ligand_element')
+                def _sh(x):
+                    import torch as _t
+                    return tuple(x.shape) if isinstance(x, _t.Tensor) else None
+                print('DBG(pre): feat_shape=', _sh(lig_feat_dbg), ' el_shape=', _sh(lig_el_dbg), flush=True)
+            except Exception:
+                pass
 
         # Get tau from model q_phi if available; fallback to batch.tau if provided
         tau_mu = None
@@ -555,14 +621,14 @@ class DiffusionTrainer:
             try:
                 atom_logits = getattr(batch, 'pred_atom_type_logits', None)
                 if isinstance(atom_logits, torch.Tensor):
-                    z = None
+                    # 优先使用真实标签 ligand_element；若缺失，再退化推断
                     lig_el = getattr(batch, 'ligand_element', None)
-                    if isinstance(lig_el, torch.Tensor):
-                        z = lig_el.to(self.device).to(torch.long)
-                    else:
+                    z = lig_el.to(self.device).to(torch.long) if isinstance(lig_el, torch.Tensor) else None
+                    if z is None:
                         lig_feat0 = self._get_field(batch, 'ligand_atom_feature')
-                        if isinstance(lig_feat0, torch.Tensor) and lig_feat0.size(1) > 0:
-                            z = lig_feat0[:, 0].to(self.device).to(torch.long)
+                        inferred = self._infer_element_labels_from_feat(lig_feat0) if isinstance(lig_feat0, torch.Tensor) else None
+                        if isinstance(inferred, torch.Tensor):
+                            z = inferred.to(self.device).to(torch.long)
                     if z is not None and atom_logits.size(0) == z.size(0):
                         palette = torch.tensor([1, 6, 7, 8, 9, 15, 16, 17, 35, 53], device=self.device)
                         z_expand = z.unsqueeze(-1).to(torch.float32)
@@ -570,10 +636,12 @@ class DiffusionTrainer:
                         dist = torch.abs(z_expand - pal_expand)
                         labels = torch.argmin(dist, dim=-1)
                         atom_type_loss = F.cross_entropy(atom_logits, labels)
+                    elif self.debug_atom_type:
+                        print('DBG(atom_loss): skip due to missing labels or size mismatch', flush=True)
             except Exception:
                 atom_type_loss = torch.tensor(0.0, device=self.device)
 
-        total_loss = diffusion_loss + 0.1 * kl_loss + 0.1 * bond_loss + self.lambda_eps * eps_loss + self.lambda_tau_smooth * tau_reg + self.lambda_tau_rank * tau_reg + self.lambda_atom_type * atom_type_loss
+        total_loss = diffusion_loss + 0.1 * kl_loss + self.lambda_bond * bond_loss + self.lambda_eps * eps_loss + self.lambda_tau_smooth * tau_reg + self.lambda_tau_rank * tau_reg + self.lambda_atom_type * atom_type_loss
 
         # Backward
         self.optimizer.zero_grad()
@@ -599,6 +667,35 @@ class DiffusionTrainer:
             'eps_loss': eps_loss.item() if isinstance(eps_loss, torch.Tensor) else 0.0,
             'atom_type_loss': atom_type_loss.item() if isinstance(atom_type_loss, torch.Tensor) else 0.0,
         }
+        # Debug atom-type distributions: print前5次每次打印，此后每50次打印一次
+        if self.debug_atom_type:
+            try:
+                self._dbg_counter += 1
+                if self._dbg_counter <= 5 or (self._dbg_counter % 50 == 0):
+                    gt = getattr(batch, 'ligand_element', None)
+                    pred_logits = getattr(batch, 'pred_atom_type_logits', None)
+                    def _print_dist(tag, tensor):
+                        import torch as _t
+                        u, c = _t.unique(tensor.to(_t.long), return_counts=True)
+                        print(f"{tag}:", {int(ui.item()): int(ci.item()) for ui, ci in zip(u, c)})
+                    if isinstance(gt, torch.Tensor):
+                        _print_dist('GT_z', gt)
+                    else:
+                        # fallback: use first column of ligand_atom_feature if available
+                        gtf = self._get_field(batch, 'ligand_atom_feature')
+                        if isinstance(gtf, torch.Tensor) and gtf.ndim == 2 and gtf.size(1) > 0:
+                            _print_dist('GT_feat_col0', gtf[:, 0])
+                        else:
+                            print('GT_z: missing', flush=True)
+                    if isinstance(pred_logits, torch.Tensor):
+                        import torch as _t
+                        cls = pred_logits.argmax(dim=-1)
+                        u2, c2 = _t.unique(cls.to(_t.long), return_counts=True)
+                        print('Pred_cls:', {int(ui.item()): int(ci.item()) for ui, ci in zip(u2, c2)}, flush=True)
+                    else:
+                        print('Pred_cls: missing', flush=True)
+            except Exception:
+                pass
         if t_scalar_log is not None:
             out_logs['t'] = t_scalar_log
         if s_stats:

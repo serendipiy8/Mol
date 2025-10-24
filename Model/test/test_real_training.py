@@ -89,7 +89,7 @@ def main():
     train_loader, test_loader = get_data_loaders(
         dataset_path=dataset_path,
         batch_size=16,
-        num_workers=0,            # Windows/LMDB 友好
+        num_workers=0,     
         split_file=split_file,
         shuffle_train=True,
         shuffle_test=False,

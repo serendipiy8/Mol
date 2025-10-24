@@ -1,0 +1,6 @@
+Metric,Value,Description
+Validity Rate,1.000,3/3 molecules are chemically valid
+Uniqueness Rate,0.333,1/3 molecules are unique
+Novelty Rate,1.000,3/3 molecules are novel
+Scaffold Diversity,0.333,1/3 unique scaffolds
+Functional Groups,0,0 different functional groups detected

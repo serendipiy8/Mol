@@ -27,11 +27,60 @@ def collate_fn_protein_ligand(batch):
     batch = [item for item in batch if item is not None]
     if not batch:
         return None
+    # 仅复制真实存在的张量字段；不做强制过滤，避免丢样本
+    ALLOW_KEYS = (
+        'ligand_pos', 'ligand_atom_feature', 'ligand_element',
+        'ligand_bond_index', 'ligand_bond_type',
+        'protein_pos', 'protein_element',
+    )
+    from torch_geometric.data import Data as _PyGData
+    sanitized = []
+    for item in batch:
+        try:
+            d = _PyGData()
+            copied_any = False
+            for k in ALLOW_KEYS:
+                v = getattr(item, k, None)
+                if isinstance(v, torch.Tensor) and v.numel() > 0:
+                    try:
+                        setattr(d, k, v)
+                        copied_any = True
+                    except Exception:
+                        pass
+            sanitized.append(d if copied_any else item)
+        except Exception:
+            sanitized.append(item)
     try:
-        return Batch.from_data_list(batch)
+        # 强制使用 PyG Batch 从 Data 列表构建，确保张量字段被拼接
+        from torch_geometric.data import Batch as _PyGBatch
+        if len(sanitized) == 0:
+            # 回退：尝试直接拼接原始 batch
+            try:
+                out = _PyGBatch.from_data_list(batch)
+            except Exception:
+                return batch[0]
+        else:
+            try:
+                out = _PyGBatch.from_data_list(sanitized)
+            except Exception:
+                # 回退：用原始 batch 尝试
+                try:
+                    out = _PyGBatch.from_data_list(batch)
+                except Exception:
+                    return batch[0]
+
+        try:
+            keys_view = out.keys if hasattr(out, 'keys') else []
+            keys_list = list(keys_view) if not callable(keys_view) else list(keys_view())
+            show = [k for k in keys_list if any(s in str(k) for s in ['ligand_', 'protein_', 'batch'])]
+            print('DBG(collate): keys=', sorted([str(k) for k in show]), ' | n_sanitized=', len(sanitized), '/', len(batch), flush=True)
+        except Exception:
+            pass
+        return out
     except Exception as e:
         print(f"Protein-ligand batch collation failed: {e}")
-        return batch[0] if batch else None
+        # best-effort: return first sanitized element to proceed
+        return sanitized[0] if sanitized else None
 
 
 def _filter_indices_by_predicate(dataset, indices, predicate_fn):
@@ -71,7 +120,10 @@ def worker_init_reconnect_db(worker_id: int):
 def get_data_loaders(dataset_path, split_file=None, batch_size=32, num_workers=0, 
                     shuffle_train=True, shuffle_test=False, collate_fn=None,
                     require_ligand: bool = False, require_feat: bool = False,
-                    require_protein: bool = False):
+                    require_protein: bool = False,
+                    train_fraction: float = 1.0,
+                    train_limit: int = 0,
+                    test_limit: int = 0):
     """
     Get training and test data loaders
     """
@@ -90,11 +142,9 @@ def get_data_loaders(dataset_path, split_file=None, batch_size=32, num_workers=0
     train_loader = None
     test_loader = None
     
-    # (kept for compatibility, no longer used)
     def _resolve_base_dataset(ds):
         return ds.dataset if isinstance(ds, Subset) else ds
 
-    # Optional: filter subsets by presence of ligand_pos(/features)
     def _pred_ok(sample):
         if sample is None:
             return False
@@ -111,8 +161,29 @@ def get_data_loaders(dataset_path, split_file=None, batch_size=32, num_workers=0
         if hasattr(train_subset, 'indices') and len(train_subset.indices) == 0:
             train_loader = None
         else:
-            train_loader = ProteinLigandDataLoader(
-                train_subset,
+            # optionally subsample training indices by fraction
+            subset_ds = train_subset
+            if isinstance(train_fraction, float) and 0.0 < train_fraction < 1.0:
+                try:
+                    import math, random
+                    idxs = list(subset_ds.indices)
+                    k = max(1, int(math.ceil(len(idxs) * train_fraction)))
+                    random.seed(42)
+                    idxs = idxs[:k]
+                    from torch.utils.data import Subset
+                    subset_ds = Subset(subset_ds.dataset, idxs)
+                except Exception:
+                    pass
+            if isinstance(train_limit, int) and train_limit > 0:
+                try:
+                    idxs = list(subset_ds.indices) if hasattr(subset_ds, 'indices') else list(range(len(subset_ds)))
+                    idxs = idxs[:train_limit]
+                    from torch.utils.data import Subset
+                    subset_ds = Subset(subset_ds.dataset, idxs)
+                except Exception:
+                    pass
+            train_loader = tud.DataLoader(
+                subset_ds,
                 batch_size=batch_size,
                 shuffle=shuffle_train,
                 num_workers=num_workers,
@@ -123,7 +194,7 @@ def get_data_loaders(dataset_path, split_file=None, batch_size=32, num_workers=0
                 collate_fn=collate_fn_protein_ligand
             )
     else:
-        train_loader = ProteinLigandDataLoader(
+        train_loader = tud.DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle_train,
@@ -139,8 +210,17 @@ def get_data_loaders(dataset_path, split_file=None, batch_size=32, num_workers=0
         if hasattr(test_subset, 'indices') and len(test_subset.indices) == 0:
             test_loader = None
         else:
-            test_loader = ProteinLigandDataLoader(
-                test_subset,
+            subset_ds_t = test_subset
+            if isinstance(test_limit, int) and test_limit > 0:
+                try:
+                    idxs = list(subset_ds_t.indices)
+                    idxs = idxs[:test_limit]
+                    from torch.utils.data import Subset
+                    subset_ds_t = Subset(subset_ds_t.dataset, idxs)
+                except Exception:
+                    pass
+            test_loader = tud.DataLoader(
+                subset_ds_t,
                 batch_size=batch_size,
                 shuffle=shuffle_test,
                 num_workers=num_workers,

@@ -1,0 +1,70 @@
+import torch
+
+from src.model.denoiser import EGNNDenoiser
+from src.model.encoders import ProteinEncoder, LigandEncoder
+from src.model.diffusion import SoftMaskDiffusionProcess, DiffusionLoss, DiffusionTrainer
+
+
+def build_model_and_trainer(args, node_dim: int, device: torch.device):
+    if args.protein_encoder_se3:
+        try:
+            from src.model.encoders.se3_encoder import SE3ProteinEncoder
+            protein_encoder = SE3ProteinEncoder(in_dim=node_dim, hidden_dim=node_dim).to(device)
+        except Exception:
+            protein_encoder = ProteinEncoder(in_dim=node_dim, hidden_dim=node_dim).to(device)
+    else:
+        protein_encoder = ProteinEncoder(in_dim=node_dim, hidden_dim=node_dim).to(device)
+    ligand_encoder = LigandEncoder(in_dim=node_dim, hidden_dim=node_dim).to(device)
+
+    model = EGNNDenoiser(
+        node_dim=node_dim,
+        edge_dim=1,
+        hidden_dim=max(int(args.hidden_dim), node_dim),
+        num_layers=int(args.num_layers),
+        use_cross_mp=bool(args.use_cross_mp),
+        cross_mp_hidden=None,
+        cross_mp_bidirectional=False,
+        cross_mp_use_distance=True,
+        cross_mp_rbf_dim=0,
+        cross_mp_use_direction=False,
+        cross_mp_distance_sigma=4.0,
+        cross_mp_dropout=0.0,
+        cross_mp_every=1,
+        use_protein_context=bool(args.use_protein_context),
+        context_mode='film',
+        context_dropout=float(args.context_dropout),
+        use_dynamic_cross_edges=True,
+        cross_topk=int(args.cross_topk),
+        cross_radius=float(args.cross_radius),
+        use_bond_head=True,
+        bond_hidden=64,
+        bond_classes=int(getattr(args, 'bond_classes', 5)),
+        bond_radius=2.2,
+        use_atom_type_head=True,
+        atom_type_classes=int(getattr(args, 'atom_type_classes', 10)),
+    ).to(device)
+
+    diffusion = SoftMaskDiffusionProcess(num_steps=int(getattr(args, 'num_steps', 100)), sigma_min=0.5, sigma_max=1.0, sigma_schedule='linear', device=str(device))
+    loss_fn = DiffusionLoss(w_max=1e2)
+    optimizer = torch.optim.Adam(model.parameters(), lr=float(getattr(args, 'lr', 1e-4)))
+    trainer = DiffusionTrainer(
+        diffusion_process=diffusion,
+        loss_fn=loss_fn,
+        optimizer=optimizer,
+        device=str(device),
+        lambda_feat=1.0,
+        grad_clip_norm=1.0,
+        aggregate_all_t=bool(args.aggregate_all_t),
+        protein_encoder=protein_encoder,
+        ligand_encoder=ligand_encoder,
+        encoder_edge_radius=5.0,
+        lambda_eps=float(getattr(args, 'lambda_eps', 0.0)),
+        lambda_tau_smooth=float(getattr(args, 'lambda_tau_smooth', 0.0)),
+        lambda_tau_rank=float(getattr(args, 'lambda_tau_rank', 0.0)),
+        lambda_atom_type=float(getattr(args, 'lambda_atom_type', 0.0)),
+        lambda_bond=float(getattr(args, 'lambda_bond', 0.1)),
+        debug_atom_type=bool(getattr(args, 'debug_atom_type', False)),
+    )
+    return model, trainer, diffusion
+
+

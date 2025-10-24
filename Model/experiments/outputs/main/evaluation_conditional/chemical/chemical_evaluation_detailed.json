@@ -1,0 +1,52 @@
+{
+  "validity": {
+    "total_molecules": 3,
+    "valid_molecules": 3,
+    "invalid_molecules": 0,
+    "validity_rate": 1.0,
+    "valid_smiles": [
+      "C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C",
+      "C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C",
+      "C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C"
+    ],
+    "invalid_smiles": []
+  },
+  "uniqueness": {
+    "total_molecules": 3,
+    "unique_molecules": 1,
+    "uniqueness_rate": 0.3333333333333333,
+    "duplicates": {
+      "C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C": 3
+    },
+    "max_duplicates": 3,
+    "avg_duplicates": 3.0
+  },
+  "novelty": {
+    "total_generated": 3,
+    "novel_molecules": 3,
+    "novelty_rate": 1.0,
+    "novel_smiles": [
+      "C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C",
+      "C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C",
+      "C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C"
+    ]
+  },
+  "scaffold_diversity": {
+    "total_molecules": 3,
+    "unique_scaffolds": 1,
+    "scaffold_diversity": 0.3333333333333333,
+    "gini_coefficient": 0.0,
+    "most_common_scaffolds": [
+      [
+        "",
+        3
+      ]
+    ]
+  },
+  "functional_groups": {
+    "total_molecules": 3,
+    "functional_groups": {},
+    "coverage": {},
+    "unique_groups": 0
+  }
+}

@@ -13,7 +13,6 @@ def _load_receptor_from_pdb(pdb_path: str, sanitize: bool = False) -> Optional[C
         if mol is None:
             return None
         if mol.GetNumConformers() == 0:
-            # build a dummy conformer if missing
             conf = Chem.Conformer(mol.GetNumAtoms())
             mol.AddConformer(conf, assignId=True)
         return mol
@@ -53,7 +52,6 @@ def _ring_centers(mol: Chem.Mol) -> np.ndarray:
 def _donors_acceptors(mol: Chem.Mol) -> Tuple[List[int], List[int]]:
     donors = rdMolDescriptors.CalcNumHBD(mol)
     acceptors = rdMolDescriptors.CalcNumHBA(mol)
-    # Heuristic: mark atoms via SMARTS (simple)
     patt_d = Chem.MolFromSmarts('[!$([#6,H0,-,-2,-3])]')
     patt_a = Chem.MolFromSmarts('[$([O,S;H1;v2]),$([O,S;H0;v2;!$(*-*=[O,N,P,S])]),$([N;v3;H0;$(Nc)])]')
     d_idx = set()

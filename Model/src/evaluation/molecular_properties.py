@@ -132,9 +132,28 @@ class MolecularPropertyEvaluator:
     def _calculate_hba(self, mol: Chem.Mol) -> int:
         return Descriptors.NumHAcceptors(mol)
     
-    # Lipinski Rule Violations
+    # Lipinski Rule Violations (RO5): HBD>5, HBA>10, MW>500, logP>5
     def _calculate_lipinski_violations(self, mol: Chem.Mol) -> int:
-        return Lipinski.NumLipinskiHBD(mol)
+        try:
+            hbd = Lipinski.NumHDonors(mol)
+        except Exception:
+            from rdkit.Chem import rdMolDescriptors
+            hbd = rdMolDescriptors.CalcNumHBD(mol)
+        try:
+            hba = Lipinski.NumHAcceptors(mol)
+        except Exception:
+            from rdkit.Chem import rdMolDescriptors
+            hba = rdMolDescriptors.CalcNumHBA(mol)
+        try:
+            mw = Descriptors.MolWt(mol)
+        except Exception:
+            mw = 0.0
+        try:
+            logp = Crippen.MolLogP(mol)
+        except Exception:
+            logp = 0.0
+        violations = int(hbd > 5) + int(hba > 10) + int(mw > 500.0) + int(logp > 5.0)
+        return violations
 
     # Effect Size(Cohen's d)
     def _calculate_effect_size(self, group1: np.ndarray, group2: np.ndarray) -> float:

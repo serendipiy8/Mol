@@ -1,0 +1,4 @@
+file,single,double,triple,aromatic,other,ring_bonds,total_bonds,sanitize_fail,num_atoms
+lig_00000.sdf,0,0,0,0,0,0,0,0,31
+lig_00001.sdf,0,0,0,0,0,0,0,0,31
+lig_00002.sdf,0,0,0,0,0,0,0,0,31

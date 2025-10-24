@@ -5,6 +5,7 @@ from typing import Optional, Union, List, Tuple
 import torch
 from torch_geometric.data import Data, Batch
 from .utils import ProteinLigandData
+import numpy as np
 
 # Helper: safe tensor conversion without copy-construct warnings
 def _to_tensor(value, dtype=None):
@@ -44,7 +45,85 @@ class CrossDockedDataset:
         self.train_indices = []
         self.test_indices = []
         self._load_split()
+        # debug: print raw_data keys only once on first successful load
+        self._printed_sample_keys = False
     
+    @staticmethod
+    def _infer_element_from_feature(feat_tensor: torch.Tensor) -> Optional[torch.Tensor]:
+        """Heuristically infer atomic numbers from feature matrix first column if plausible.
+        Conditions:
+          - feat dim >=1
+          - values are integers within [1, 53]
+          - majority (>=80%) fall into a common palette of frequent biochem elements
+        Returns long tensor of same length or None if unreliable.
+        """
+        try:
+            if not isinstance(feat_tensor, torch.Tensor) or feat_tensor.ndim != 2 or feat_tensor.size(1) < 1:
+                return None
+            col0 = feat_tensor[:, 0].detach().cpu().to(torch.float32)
+            # round to nearest int and check closeness
+            col0_int = torch.round(col0).to(torch.long)
+            if (col0 - col0_int.to(col0.dtype)).abs().mean().item() > 0.05:
+                return None
+            # basic range and diversity checks
+            if col0_int.numel() == 0:
+                return None
+            vmin = int(col0_int.min().item())
+            vmax = int(col0_int.max().item())
+            uniq = torch.unique(col0_int)
+            if vmin < 1 or vmax > 53 or uniq.numel() < 3:
+                return None
+            palette = torch.tensor([1, 6, 7, 8, 9, 15, 16, 17, 35, 53], dtype=torch.long)
+            # count membership ratio to palette
+            isin = (col0_int.unsqueeze(-1) == palette.unsqueeze(0)).any(dim=-1)
+            ratio = float(isin.float().mean().item())
+            if ratio < 0.8:
+                return None
+            return col0_int
+        except Exception:
+            return None
+
+    @staticmethod
+    def _infer_vector_from_raw(raw_data: dict, n: int) -> Optional[torch.Tensor]:
+        """Scan raw_data to find a plausible 1D integer vector length n for atomic numbers."""
+        try:
+            cand_keys = [k for k in raw_data.keys() if any(s in k.lower() for s in ['element', 'atomic', 'z'])]
+            order = cand_keys + list(raw_data.keys())
+            for k in order:
+                try:
+                    arr = torch.as_tensor(raw_data[k])
+                except Exception:
+                    continue
+                if not isinstance(arr, torch.Tensor) or arr.ndim != 1 or int(arr.numel()) != int(n):
+                    continue
+                ai = arr.to(torch.float32)
+                aint = torch.round(ai).to(torch.long)
+                if (ai - aint.to(ai.dtype)).abs().mean().item() > 0.05:
+                    continue
+                if int(aint.min().item()) < 1 or int(aint.max().item()) > 53:
+                    continue
+                return aint
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _infer_matrix_from_raw(raw_data: dict, n: int) -> Optional[torch.Tensor]:
+        """Scan raw_data to find a plausible [n, d] float matrix for ligand features."""
+        try:
+            for k, v in raw_data.items():
+                try:
+                    arr = torch.as_tensor(v)
+                except Exception:
+                    continue
+                if not isinstance(arr, torch.Tensor) or arr.ndim != 2:
+                    continue
+                if int(arr.size(0)) == int(n) and int(arr.size(1)) > 0:
+                    return arr.to(torch.float32)
+        except Exception:
+            return None
+        return None
+
     def _find_lmdb_and_name2id_files(self) -> Tuple[str, str]:
         """Find LMDB and name2id files"""
         
@@ -234,6 +313,14 @@ class CrossDockedDataset:
             raw_data = pickle.loads(bytes(raw)) if raw is not None else None
             if raw_data is None:
                 return None
+            # Print raw_data keys for the very first successfully loaded sample
+            try:
+                if not self._printed_sample_keys:
+                    keys_list = list(raw_data.keys()) if hasattr(raw_data, 'keys') else []
+                    print('DEBUG_RAW_KEYS:', sorted([str(k) for k in keys_list]), flush=True)
+                    self._printed_sample_keys = True
+            except Exception:
+                pass
             
             # Convert to ProteinLigandData object
             data = ProteinLigandData()
@@ -268,9 +355,11 @@ class CrossDockedDataset:
                 data.ligand_atom_feature = _to_tensor(raw_data['ligand_context_feature'], dtype=torch.float32)
             if 'ligand_bond_index' in raw_data:
                 data.ligand_bond_index = _to_tensor(raw_data['ligand_bond_index'], dtype=torch.long)
-            # Essential guard: ensure ligand_pos 存在，否则丢弃该样本
-            if not hasattr(data, 'ligand_pos') or data.ligand_pos is None:
-                return None
+
+            if 'ligand_element' in raw_data:
+                data.ligand_element = _to_tensor(raw_data['ligand_element'], dtype=torch.long)
+            if 'protein_element' in raw_data:
+                data.protein_element = _to_tensor(raw_data['protein_element'], dtype=torch.long)
 
             return data
             
@@ -318,6 +407,7 @@ class PDBBindDataset:
         self.train_indices = []
         self.test_indices = []
         self._load_split()
+        self._printed_sample_keys = False
     
     def _find_lmdb_and_name2id_files(self) -> Tuple[str, str]:
         """Find LMDB and name2id files"""
@@ -502,6 +592,13 @@ class PDBBindDataset:
             raw_data = pickle.loads(bytes(raw)) if raw is not None else None
             if raw_data is None:
                 return None
+            try:
+                if not self._printed_sample_keys:
+                    keys_list = list(raw_data.keys()) if hasattr(raw_data, 'keys') else []
+                    print('DEBUG_RAW_KEYS:', sorted([str(k) for k in keys_list]), flush=True)
+                    self._printed_sample_keys = True
+            except Exception:
+                pass
             
             # Convert to ProteinLigandData object
             data = ProteinLigandData()
@@ -535,6 +632,15 @@ class PDBBindDataset:
                 data.ligand_atom_feature = _to_tensor(raw_data[lig_feat_key], dtype=torch.float32)
             if 'ligand_bond_index' in raw_data:
                 data.ligand_bond_index = _to_tensor(raw_data['ligand_bond_index'], dtype=torch.long)
+            if 'ligand_element' in raw_data:
+                data.ligand_element = _to_tensor(raw_data['ligand_element'], dtype=torch.long)
+            if 'protein_element' in raw_data:
+                data.protein_element = _to_tensor(raw_data['protein_element'], dtype=torch.long)
+            if not hasattr(data, 'ligand_element') or data.ligand_element is None:
+                if hasattr(data, 'ligand_atom_feature') and isinstance(data.ligand_atom_feature, torch.Tensor):
+                    inferred = CrossDockedDataset._infer_element_from_feature(data.ligand_atom_feature)
+                    if isinstance(inferred, torch.Tensor):
+                        data.ligand_element = inferred.to(torch.long)
             
             # Other attributes (keep if present)
             ctx_pos_key = _first_key(raw_data, ['ligand_context_pos'])

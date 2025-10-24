@@ -15,7 +15,7 @@ class SE3ProteinEncoder(nn.Module):
     """
     SE(3)-aware protein encoder.
     - If e3nn is available, use a lightweight equivariant layer to get scalar and vector contexts;
-      otherwise fallback to EGNN (仍具 E(3) 等变)。
+      otherwise fallback to EGNN 。
     Returns (h_nodes, g_P_scalar, g_vec_direction[3] or None).
     """
 
