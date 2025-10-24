@@ -29,6 +29,9 @@ class EGNNLayer(nn.Module):
         x_i, x_j = x[dst], x[src]
         diff = pos[dst] - pos[src]
         r2 = (diff ** 2).sum(dim=-1, keepdim=True)
+        # unit direction to stabilize coordinate updates
+        r = torch.sqrt(r2 + 1e-8)
+        dir_ij = diff / r
 
         if edge_attr is None:
             edge_attr = torch.zeros(diff.size(0), 0, device=x.device)
@@ -49,12 +52,13 @@ class EGNNLayer(nn.Module):
 
         # coord update (equivariant)
         gamma = self.coord_mlp(m_ij)  # [E,1]
-        coord_update = scatter_add(gamma * diff, dst, dim=0, dim_size=pos.size(0))
+        coord_update = scatter_add(gamma * dir_ij, dst, dim=0, dim_size=pos.size(0))
         if self.degree_norm:
             ones = torch.ones(m_ij.size(0), 1, device=pos.device, dtype=pos.dtype)
             deg = scatter_add(ones, dst, dim=0, dim_size=pos.size(0))
             coord_update = coord_update / (deg.clamp_min(1.0))
         pos = pos + coord_update
+
         return x, pos
 
 
@@ -67,18 +71,47 @@ class EGNNDenoiser(nn.Module):
                  use_protein_context: bool = True, context_mode: str = 'film', context_dropout: float = 0.0,
                  use_dynamic_cross_edges: bool = True, cross_topk: int = 32, cross_radius: float = 6.0,
                  use_bond_head: bool = True, bond_hidden: int = 128, bond_classes: int = 2, bond_radius: float = 2.2,
-                 use_atom_type_head: bool = True, atom_type_classes: int = 10):
+                 use_atom_type_head: bool = True, atom_type_classes: int = 10,
+                 use_dual_branch: bool = True, coord_use_tanh: bool = False, coord_alpha_min: float = 0.1,
+                 debug_graph: bool = False):
         super().__init__()
         self.use_time = use_time
         self.use_s_gate = use_s_gate
         self.time_dim = time_dim
         in_dim = node_dim + 1 + (time_dim if use_time else 0)
         self.input_proj = nn.Linear(in_dim, hidden_dim)
-        self.layers = nn.ModuleList([
-            EGNNLayer(hidden_dim, edge_dim, hidden_dim, degree_norm=degree_norm) for _ in range(num_layers)
-        ])
+        self.use_dual_branch = bool(use_dual_branch)
+        self.coord_use_tanh = bool(coord_use_tanh)
+        self.coord_alpha_min = float(coord_alpha_min)
+        self.debug_graph = bool(debug_graph)
+        if self.use_dual_branch:
+            # 更强坐标更新：坐标分支关闭度归一化，增强位移与梯度；特征分支保留度归一化稳定特征学习
+            self.coord_layers = nn.ModuleList([
+                EGNNLayer(hidden_dim, edge_dim, hidden_dim, degree_norm=False) for _ in range(num_layers)
+            ])
+            self.feat_layers = nn.ModuleList([
+                EGNNLayer(hidden_dim, edge_dim, hidden_dim, degree_norm=degree_norm) for _ in range(num_layers)
+            ])
+        else:
+            self.layers = nn.ModuleList([
+                EGNNLayer(hidden_dim, edge_dim, hidden_dim, degree_norm=degree_norm) for _ in range(num_layers)
+            ])
         self.out_coord = nn.Linear(hidden_dim, 3)
         self.out_feat = nn.Linear(hidden_dim, node_dim)
+
+        # local knn fallback to ensure connectivity
+        def _knn_graph(pos: torch.Tensor, k: int = 8) -> torch.Tensor:
+            if not isinstance(pos, torch.Tensor) or pos.ndim != 2 or pos.size(0) == 0:
+                return torch.empty(2, 0, dtype=torch.long, device=pos.device if isinstance(pos, torch.Tensor) else 'cpu')
+            with torch.no_grad():
+                D = torch.cdist(pos, pos, p=2)
+                N = D.size(0)
+                D.fill_diagonal_(float('inf'))
+                _, idx = torch.topk(-D, k=k, dim=-1)  # smallest distances
+                src = torch.arange(N, device=pos.device).unsqueeze(1).repeat(1, k).reshape(-1)
+                dst = idx.reshape(-1)
+            return torch.stack([src, dst], dim=0)
+        self._knn_graph = _knn_graph
 
         # cross-graph message passing
         self.use_cross_mp = use_cross_mp
@@ -165,6 +198,32 @@ class EGNNDenoiser(nn.Module):
         p_idx_local = src[mask]
         l_idx_local = dst[mask] - Np
         return torch.stack([p_idx_local, l_idx_local], dim=0)
+
+    @staticmethod
+    def _radius_graph(pos: torch.Tensor, radius: float, topk: int = 8) -> torch.Tensor:
+        if pos is None or pos.numel() == 0:
+            return torch.empty(2, 0, dtype=torch.long, device=pos.device if isinstance(pos, torch.Tensor) else 'cpu')
+        D = torch.cdist(pos, pos)
+        mask = (D < radius) & (D > 0)
+        N = pos.size(0)
+        edges_i = []
+        edges_j = []
+        for i in range(N):
+            nbrs = torch.nonzero(mask[i], as_tuple=False).squeeze(-1)
+            if nbrs.numel() == 0:
+                continue
+            dists = D[i, nbrs]
+            k = min(int(topk), int(nbrs.numel()))
+            _, idx = torch.topk(dists, k, largest=False)
+            sel = nbrs[idx]
+            edges_i.append(torch.full((k,), i, device=pos.device, dtype=torch.long))
+            edges_j.append(sel)
+        if not edges_i:
+            return torch.empty(2, 0, dtype=torch.long, device=pos.device)
+        ei = torch.cat(edges_i)
+        ej = torch.cat(edges_j)
+        # make directed both ways
+        return torch.cat([torch.stack([ei, ej], dim=0), torch.stack([ej, ei], dim=0)], dim=1)
 
     def _recompute_cross_edges(self, prot_pos: torch.Tensor, lig_pos: torch.Tensor) -> torch.Tensor:
         if prot_pos is None or lig_pos is None or prot_pos.numel() == 0 or lig_pos.numel() == 0:
@@ -284,6 +343,25 @@ class EGNNDenoiser(nn.Module):
         if h_t is None:
             raise ValueError('EGNNDenoiser requires node features h_t')
 
+        # Edge-free sampling path: no graph/message passing, direct residual
+        if bool(getattr(batch, '_edge_free', False)):
+            if isinstance(t, torch.Tensor):
+                t_tensor = t.to(h_t.device)
+                t_scalar = t_tensor if t_tensor.dim() == 0 else t_tensor.reshape(-1)[0]
+            else:
+                t_scalar = torch.tensor(float(t), device=h_t.device)
+            t_emb = self._time_embed(t_scalar, h_t.size(0), h_t.device)
+            node_in = torch.cat([h_t, s_t.unsqueeze(-1), t_emb], dim=-1)
+            x = F.silu(self.input_proj(node_in))
+            delta = self.out_coord(x)
+            x0_pred = x_t + delta
+            h0_pred = self.out_feat(x)
+            setattr(batch, 'eps_coord_pred', self.eps_coord_head(x))
+            setattr(batch, 'eps_feat_pred', self.eps_feat_head(x))
+            if self.use_atom_type_head:
+                setattr(batch, 'pred_atom_type_logits', self.atom_type_head(x))
+            return x0_pred, h0_pred
+
         node_type = getattr(batch, 'node_type', None)
         num_protein = getattr(batch, 'num_protein_atoms', None)
         pos_all = getattr(batch, 'pos', None)
@@ -378,16 +456,122 @@ class EGNNDenoiser(nn.Module):
                 xhid[Np:Np+Nl] = h_l_out
 
             if edge_index is None or edge_index.numel() == 0:
-                N = xhid.size(0)
-                eye = torch.arange(N, device=xhid.device)
-                edge_index = torch.stack([eye, eye], dim=0)
-                edge_attr = torch.zeros(N, 1, device=xhid.device, dtype=xhid.dtype)
+                # Build pp/ll/cross edges by radius and merge
+                prot_pos_cur = getattr(batch, 'protein_pos', None)
+                lig_pos_cur = getattr(batch, 'ligand_pos', None)
+                if prot_pos_cur is None or lig_pos_cur is None:
+                    prot_pos_cur = pos[:Np]
+                    lig_pos_cur = pos[Np:Np+Nl]
+                pp = self._radius_graph(prot_pos_cur, radius=max(4.0, self.cross_radius), topk=12)
+                ll = self._radius_graph(lig_pos_cur, radius=max(2.0, self.bond_radius), topk=6)
+                if ll.numel() == 0:
+                    ll = self._knn_graph(lig_pos_cur, k=6)
+                if self.debug_graph:
+                    pp_n = int(pp.size(1)) if isinstance(pp, torch.Tensor) else 0
+                    ll_n = int(ll.size(1)) if isinstance(ll, torch.Tensor) else 0
+                # offset to global indices
+                if pp.numel() > 0:
+                    pp_global = pp.clone()
+                else:
+                    pp_global = torch.empty(2, 0, dtype=torch.long, device=pos.device)
+                if ll.numel() > 0:
+                    ll_global = ll + torch.tensor([[Np],[Np]], device=ll.device)
+                else:
+                    ll_global = torch.empty(2, 0, dtype=torch.long, device=pos.device)
+                # cross edges from radius recomputation
+                cross_local = self._recompute_cross_edges(prot_pos_cur, lig_pos_cur)
+                if cross_local.numel() > 0:
+                    cross_global = torch.stack([cross_local[0], cross_local[1] + Np], dim=0)
+                    # add both directions
+                    cross_global = torch.cat([cross_global, torch.stack([cross_global[1], cross_global[0]], dim=0)], dim=1)
+                else:
+                    cross_global = torch.empty(2, 0, dtype=torch.long, device=pos.device)
+                if self.debug_graph:
+                    cr_n = int(cross_global.size(1)) if isinstance(cross_global, torch.Tensor) else 0
+                    tot_n = int(pp_global.size(1) + ll_global.size(1) + cr_n)
+                    print(f"[GRAPH] pp={pp_n} ll={ll_n} cross={cr_n} total={tot_n}")
+                edge_index = torch.cat([pp_global, ll_global, cross_global], dim=1) if (pp_global.numel() + ll_global.numel() + cross_global.numel()) > 0 else torch.empty(2, 0, dtype=torch.long, device=pos.device)
+                # edge_attr: mark cross edges with 1, others 0
+                num_pp = pp_global.size(1)
+                num_ll = ll_global.size(1)
+                num_cr = cross_global.size(1)
+                if (num_pp + num_ll + num_cr) > 0:
+                    attr = torch.zeros(num_pp + num_ll + num_cr, 1, device=pos.device, dtype=xhid.dtype)
+                    if num_cr > 0:
+                        attr[num_pp + num_ll:] = 1.0
+                    edge_attr = attr
+                else:
+                    edge_attr = torch.zeros(0, 1, device=pos.device, dtype=xhid.dtype)
 
-            for layer_idx, layer in enumerate(self.layers):
-                xhid, pos = layer(xhid, pos, edge_index, edge_attr, s=s_all if self.use_s_gate else None)
-                if self.use_cross_mp and self.cross_mp is not None and ((layer_idx + 1) % self.cross_mp_every == 0):
-                    h_prot_cur = xhid[:Np]
-                    h_lig_cur = xhid[Np:Np+Nl]
+            if not self.use_dual_branch:
+                branches = [('single', xhid, pos)]
+            else:
+                branches = []
+                xhid_c = xhid.clone()
+                xhid_f = xhid.clone()
+                pos_c = pos
+                pos_f = pos
+                # run coord branch
+                for layer_idx, layer in enumerate(self.coord_layers):
+                    xhid_c, pos_c = layer(xhid_c, pos_c, edge_index, edge_attr, s=s_all if self.use_s_gate else None)
+                    if self.use_cross_mp and self.cross_mp is not None and ((layer_idx + 1) % self.cross_mp_every == 0):
+                        h_prot_cur = xhid_c[:Np]
+                        h_lig_cur = xhid_c[Np:Np+Nl]
+                        prot_pos_cur = getattr(batch, 'protein_pos', None) or pos_c[:Np]
+                        lig_pos_cur = getattr(batch, 'ligand_pos', None) or pos_c[Np:Np+Nl]
+                        cross_edges_local = self._recompute_cross_edges(prot_pos_cur, lig_pos_cur) if self.use_dynamic_cross_edges else self._get_cross_edges_local(batch, Np, Nl, node_type, edge_index)
+                        s_mask = s_all[Np:Np+Nl] if self.use_s_gate else None
+                        h_p_out, h_l_out = self.cross_mp(
+                            h_prot=h_prot_cur,
+                            h_lig=h_lig_cur,
+                            cross_edges=cross_edges_local,
+                            prot_pos=prot_pos_cur,
+                            lig_pos=lig_pos_cur,
+                            edge_attr=None,
+                            s_mask=s_mask,
+                            t_bias=None,
+                            use_softmax=True,
+                            use_dist_decay=True,
+                        )
+                        xhid_c = xhid_c.clone()
+                        if h_p_out is not None and h_p_out.size(0) == Np:
+                            xhid_c[:Np] = h_p_out
+                        xhid_c[Np:Np+Nl] = h_l_out
+                # run feat branch (ignore its pos updates)
+                for layer_idx, layer in enumerate(self.feat_layers):
+                    xhid_f, _ = layer(xhid_f, pos_f, edge_index, edge_attr, s=s_all if self.use_s_gate else None)
+                    if self.use_cross_mp and self.cross_mp is not None and ((layer_idx + 1) % self.cross_mp_every == 0):
+                        h_prot_cur = xhid_f[:Np]
+                        h_lig_cur = xhid_f[Np:Np+Nl]
+                        prot_pos_cur = getattr(batch, 'protein_pos', None) or pos[:Np]
+                        lig_pos_cur = getattr(batch, 'ligand_pos', None) or pos[Np:Np+Nl]
+                        cross_edges_local = self._recompute_cross_edges(prot_pos_cur, lig_pos_cur) if self.use_dynamic_cross_edges else self._get_cross_edges_local(batch, Np, Nl, node_type, edge_index)
+                        s_mask = s_all[Np:Np+Nl] if self.use_s_gate else None
+                        h_p_out, h_l_out = self.cross_mp(
+                            h_prot=h_prot_cur,
+                            h_lig=h_lig_cur,
+                            cross_edges=cross_edges_local,
+                            prot_pos=prot_pos_cur,
+                            lig_pos=lig_pos_cur,
+                            edge_attr=None,
+                            s_mask=s_mask,
+                            t_bias=None,
+                            use_softmax=True,
+                            use_dist_decay=True,
+                        )
+                        xhid_f = xhid_f.clone()
+                        if h_p_out is not None and h_p_out.size(0) == Np:
+                            xhid_f[:Np] = h_p_out
+                        xhid_f[Np:Np+Nl] = h_l_out
+                branches.append(('coord_feat', (xhid_c, pos_c, xhid_f)))
+
+            if not self.use_dual_branch:
+                # original single branch
+                for layer_idx, layer in enumerate(self.layers):
+                    xhid, pos = layer(xhid, pos, edge_index, edge_attr, s=s_all if self.use_s_gate else None)
+                    if self.use_cross_mp and self.cross_mp is not None and ((layer_idx + 1) % self.cross_mp_every == 0):
+                        h_prot_cur = xhid[:Np]
+                        h_lig_cur = xhid[Np:Np+Nl]
                     prot_pos_cur = getattr(batch, 'protein_pos', None)
                     lig_pos_cur = getattr(batch, 'ligand_pos', None)
                     if prot_pos_cur is None or lig_pos_cur is None:
@@ -415,25 +599,38 @@ class EGNNDenoiser(nn.Module):
                         xhid[:Np] = h_p_out
                     xhid[Np:Np+Nl] = h_l_out
 
-            x_lig = xhid[Np:Np+Nl]
-            x0_pred = self.out_coord(x_lig)
-            h0_pred = self.out_feat(x_lig)
+            if not self.use_dual_branch:
+                x_lig_c = xhid[Np:Np+Nl]
+                x_lig_f = x_lig_c
+            else:
+                xhid_c, pos_c, xhid_f = branches[-1][1]
+                x_lig_c = xhid_c[Np:Np+Nl]
+                x_lig_f = xhid_f[Np:Np+Nl]
+            # removed verbose forward debug prints
+            # Predict coordinates as residual on x_t with step-dependent scale and limiting
+            # 强力残差头：直接对 x_t 回归 Δ，增强坐标梯度
+            x0_pred = x_t + self.out_coord(x_lig_c)
+            # optional tiny residual refinement (disabled by default):
+            # x0_pred = x0_pred + 0.1 * self.out_coord(x_lig_c)
+            h0_pred = self.out_feat(x_lig_f)
+
+            # reduce per-iteration prints
 
             # epsilon predictions for supervision (optional)
-            eps_coord_pred = self.eps_coord_head(x_lig)
-            eps_feat_pred = self.eps_feat_head(x_lig)
+            eps_coord_pred = self.eps_coord_head(x_lig_c)
+            eps_feat_pred = self.eps_feat_head(x_lig_f)
             setattr(batch, 'eps_coord_pred', eps_coord_pred)
             setattr(batch, 'eps_feat_pred', eps_feat_pred)
 
             # atom type predictions (optional)
             if self.use_atom_type_head:
-                atom_logits = self.atom_type_head(x_lig)
+                atom_logits = self.atom_type_head(x_lig_f)
                 setattr(batch, 'pred_atom_type_logits', atom_logits)
 
             # optional ligand bond prediction (attach to batch)
             if self.use_bond_head:
                 pos_lig = pos[Np:Np+Nl]
-                edge_ll, bond_logits = self._predict_bonds(h_lig=x_lig, pos_lig=pos_lig)
+                edge_ll, bond_logits = self._predict_bonds(h_lig=x_lig_c, pos_lig=pos_lig)
                 setattr(batch, 'pred_bond_index', edge_ll)
                 setattr(batch, 'pred_bond_logits', bond_logits)
 
@@ -450,17 +647,35 @@ class EGNNDenoiser(nn.Module):
         pos = x_t
 
         if edge_index is None or edge_index.numel() == 0:
-            N = x.size(0)
-            eye = torch.arange(N, device=x.device)
-            edge_index = torch.stack([eye, eye], dim=0)
-            edge_attr = torch.zeros(N, 1, device=x.device, dtype=x.dtype)
+            # Build ligand-ligand radius graph for message passing
+            ll = self._radius_graph(pos, radius=max(2.0, self.bond_radius), topk=6)
+            if ll.numel() == 0:
+                ll = self._knn_graph(pos, k=6)
+            edge_index = ll if ll.numel() > 0 else torch.empty(2, 0, dtype=torch.long, device=x.device)
+            edge_attr = torch.zeros(edge_index.size(1), 1, device=x.device, dtype=x.dtype) if edge_index.numel() > 0 else torch.zeros(0, 1, device=x.device, dtype=x.dtype)
 
-        for layer in self.layers:
-            x, pos = layer(x, pos, edge_index, edge_attr, s=s_t if self.use_s_gate else None)
+        if not self.use_dual_branch:
+            for layer in self.layers:
+                x, pos = layer(x, pos, edge_index, edge_attr, s=s_t if self.use_s_gate else None)
+            x_c = x
+            x_f = x
+        else:
+            x_c = x.clone()
+            x_f = x.clone()
+            pos_c = pos
+            for layer in self.coord_layers:
+                x_c, pos_c = layer(x_c, pos_c, edge_index, edge_attr, s=s_t if self.use_s_gate else None)
+            for layer in self.feat_layers:
+                x_f, _ = layer(x_f, pos, edge_index, edge_attr, s=s_t if self.use_s_gate else None)
 
-        x0_pred = self.out_coord(x)
-        h0_pred = self.out_feat(x)
 
+        # 强力残差头（ligand-only）：对 x_t 回归 Δ
+        x0_pred = x_t + self.out_coord(x_c)
+        # optional tiny residual: x0_pred = x0_pred + 0.1 * self.out_coord(x_c)
+        # reduce per-iteration prints
+
+        h0_pred = self.out_feat(x_f)
+        
         # optional ligand bond prediction on ligand-only path (if positions available)
         if self.use_bond_head:
             edge_ll, bond_logits = self._predict_bonds(h_lig=x, pos_lig=pos)
@@ -468,11 +683,11 @@ class EGNNDenoiser(nn.Module):
             setattr(batch, 'pred_bond_logits', bond_logits)
 
         # epsilon prediction heads on ligand-only path
-        setattr(batch, 'eps_coord_pred', self.eps_coord_head(x))
-        setattr(batch, 'eps_feat_pred', self.eps_feat_head(x))
+        setattr(batch, 'eps_coord_pred', self.eps_coord_head(x_c))
+        setattr(batch, 'eps_feat_pred', self.eps_feat_head(x_f))
 
         if self.use_atom_type_head:
-            setattr(batch, 'pred_atom_type_logits', self.atom_type_head(x))
+            setattr(batch, 'pred_atom_type_logits', self.atom_type_head(x_f))
 
         return x0_pred, h0_pred
 

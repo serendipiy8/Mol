@@ -63,7 +63,6 @@ def collate_fn_protein_ligand(batch):
             try:
                 out = _PyGBatch.from_data_list(sanitized)
             except Exception:
-                # 回退：用原始 batch 尝试
                 try:
                     out = _PyGBatch.from_data_list(batch)
                 except Exception:

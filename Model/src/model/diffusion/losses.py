@@ -5,12 +5,8 @@ from typing import Tuple
 
 
 class DiffusionLoss:
-    """
-    Loss functions for LO-MaskDiff training.
-    Implements weighted reconstruction loss and stable KL for tau params.
-    """
 
-    def __init__(self, loss_type: str = 'mse', reweighting: bool = True,
+    def __init__(self, loss_type: str = 'mse', reweighting: bool = False,
                  w_max: float = 1e3, eps: float = 1e-8):
         self.loss_type = loss_type
         self.reweighting = reweighting
@@ -19,9 +15,6 @@ class DiffusionLoss:
 
     def compute_loss(self, x0: torch.Tensor, x0_pred: torch.Tensor,
                      s_t: torch.Tensor, sigma_t: torch.Tensor) -> torch.Tensor:
-        """
-        Weighted reconstruction loss per LO-MaskDiff: w = 1/(((1-s)^2)*sigma^2 + eps).
-        """
 
         if self.loss_type == 'mse':
             base_loss = F.mse_loss(x0_pred, x0, reduction='none')
@@ -32,10 +25,12 @@ class DiffusionLoss:
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
 
-        base_loss = base_loss.sum(dim=-1) 
+        base_loss = base_loss.mean(dim=-1) 
 
         if self.reweighting:
-            weights = 1.0 / (((1.0 - s_t) ** 2) * (sigma_t ** 2) + self.eps)
+            sigma_safe = torch.clamp(sigma_t, min=1e-4)
+            s_safe = torch.clamp(1.0 - s_t, min=1e-4)
+            weights = 1.0 / (s_safe ** 2 * sigma_safe ** 2 + self.eps)
             weights = torch.clamp(weights, max=self.w_max)
             weights = weights / (weights.mean() + self.eps)
             base_loss = base_loss * weights
@@ -46,9 +41,10 @@ class DiffusionLoss:
                                  h0_feat: torch.Tensor, h0_pred: torch.Tensor,
                                  s_t: torch.Tensor, sigma_coord: torch.Tensor,
                                  sigma_feat: torch.Tensor, lambda_feat: float = 100) -> torch.Tensor:
+
         loss_coord = self.compute_loss(x0_coord, x0_pred, s_t, sigma_coord)
         loss_feat = self.compute_loss(h0_feat, h0_pred, s_t, sigma_feat)
-        print(f"loss_coord: {loss_coord}, loss_feat: {loss_feat}")
+        
         return loss_coord + lambda_feat * loss_feat
 
     def compute_kl_loss(self, mu: torch.Tensor, log_sigma: torch.Tensor,

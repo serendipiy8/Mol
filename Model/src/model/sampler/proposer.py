@@ -32,7 +32,7 @@ class Proposer:
         return pos, elem
 
     def propose_from_receptor(self, protein_pos: torch.Tensor, num_atoms: int,
-                               sigma: float = 4.0, element_prior: Optional[List[int]] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                               sigma: float = 1.0, element_prior: Optional[List[int]] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         center = self._estimate_pocket_center(protein_pos)
         return self.propose(num_atoms=num_atoms, center=center, sigma=sigma, element_prior=element_prior)
 
