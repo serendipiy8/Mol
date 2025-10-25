@@ -289,6 +289,24 @@ class ConditionalSampler:
             else:
                 x0 = self.sample_once(model, batch, use_multi_modal=False)
             coords = x0.detach().cpu().numpy()
+            # Re-center coordinates to dataset frame for writing (prefer ligand COM, else ligand/protein mean)
+            try:
+                ref_center = None
+                lig_com = self._get_field(batch, 'ligand_center_of_mass')
+                if isinstance(lig_com, torch.Tensor) and lig_com.numel() == 3:
+                    ref_center = lig_com.detach().cpu().numpy()
+                if ref_center is None:
+                    lig_pos_ref = self._get_field(batch, 'ligand_pos')
+                    if isinstance(lig_pos_ref, torch.Tensor) and lig_pos_ref.ndim == 2 and lig_pos_ref.size(1) == 3 and lig_pos_ref.size(0) > 0:
+                        ref_center = lig_pos_ref.mean(dim=0).detach().cpu().numpy()
+                if ref_center is None:
+                    prot_pos_ref = self._get_field(batch, 'protein_pos')
+                    if isinstance(prot_pos_ref, torch.Tensor) and prot_pos_ref.ndim == 2 and prot_pos_ref.size(1) == 3 and prot_pos_ref.size(0) > 0:
+                        ref_center = prot_pos_ref.mean(dim=0).detach().cpu().numpy()
+                if ref_center is not None:
+                    coords = coords + ref_center.reshape(1, 3)
+            except Exception:
+                pass
             print(f"DEBUG sample_and_write -> sample {i} coords shape:", coords.shape)
 
             if use_multi_modal and h_last is not None and hasattr(model, 'atom_type_head'):
@@ -298,7 +316,6 @@ class ConditionalSampler:
                     print("WARNING: logits batch size does not match n_atoms")
                 elements = self._map_classes_to_elements(logits.argmax(dim=-1))
 
-<<<<<<< HEAD
             # Build RDKit Mol from coords, then add reasonable bonds by distance/valence heuristics
             from rdkit import Chem
             mol = build_rdkit_mol_from_coords(elements, coords)
@@ -336,15 +353,10 @@ class ConditionalSampler:
                 except Exception:
                     pass
             sdf_path = os.path.join(out_dir, f"{prefix}_{i:05d}.sdf")
-=======
-            sdf_path = os.path.join(out_dir, f"{prefix}_{i:05d}.sdf")
-            from rdkit import Chem
-            mol = build_rdkit_mol_from_coords(elements, coords)
->>>>>>> parent of 9f06ac1 (train and sample)
             try:
-                Chem.SanitizeMol(mol)
-            except Exception as e:
-                print("WARNING: SanitizeMol failed:", e)
+                Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_PROPERTIES | Chem.SanitizeFlags.SANITIZE_SYMMRINGS)
+            except Exception:
+                pass
             write_rdkit_mol_sdf(mol, sdf_path)
             sdf_paths.append(sdf_path)
         return sdf_paths

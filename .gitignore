@@ -10,3 +10,4 @@ Model/experiments/outputs/docking_from_lmdb/temp_mols/rec_00002.pdbqt
 Model/src/data/crossdocked_v1.1_rmsd1.0_processed/crossdocked_v1.1_rmsd1.0_processed_full_ref_prior_aromatic.lmdb
 Model/src/data/split_by_name.pt
 Model/src/data/crossdocked_v1.1_rmsd1.0_processed/crossdocked_v1.1_rmsd1.0_processed_full_ref_prior_aromatic_name2id.pt
+/baseline/DecompDiff
