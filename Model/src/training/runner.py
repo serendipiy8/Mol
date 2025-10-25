@@ -30,13 +30,20 @@ def run_train(args):
     set_seed(int(args.seed))
     device = torch.device(args.device)
 
-    train_loader, _ = get_data_loaders(dataset_path=args.dataset_path, split_file=args.split_file,
-                                       batch_size=int(args.batch_size), num_workers=int(args.num_workers),
-                                       shuffle_train=False, shuffle_test=False, require_ligand=True,
-                                       require_feat=True, require_protein=True,
-                                       train_fraction=float(getattr(args, 'train_fraction', 1.0)),
-                                       train_limit=int(getattr(args, 'train_limit', 0) or 0),
-                                       test_limit=int(getattr(args, 'test_limit', 0) or 0))
+    train_loader, _ = get_data_loaders(
+        dataset_path=args.dataset_path,
+        split_file=args.split_file,
+        batch_size=int(args.batch_size),
+        num_workers=int(args.num_workers),
+        shuffle_train=True,
+        shuffle_test=False,
+        require_ligand=True,
+        require_feat=True,
+        require_protein=True,
+        train_fraction=float(getattr(args, 'train_fraction', 1.0)),
+        train_limit=int(getattr(args, 'train_limit', 0) or 0),
+        test_limit=int(getattr(args, 'test_limit', 0) or 0)
+    )
 
     if train_loader is None:
         raise RuntimeError('Train DataLoader is None')
@@ -45,7 +52,6 @@ def run_train(args):
     lig_feat = getattr(first_batch, 'ligand_atom_feature', None)
     node_dim = int(lig_feat.size(1)) if isinstance(lig_feat, torch.Tensor) and lig_feat.ndim == 2 else 64
 
-    # Force-enable protein context injection and cross-graph message passing for training
     model, trainer, _ = build_model_and_trainer(args, node_dim, device)
     soft_mask = SoftMaskTransform()
 
@@ -89,13 +95,12 @@ def run_train(args):
     epoch_csv_path = os.path.join(args.out_dir, 'train_logs.csv')
     if not os.path.isfile(epoch_csv_path):
         with open(epoch_csv_path, 'w', encoding='utf-8') as f:
-            f.write('epoch,total,diff,coord,feat,kl,bond,atom\n')
+            f.write('epoch,total,diff,kl,bond,atom\n')
 
     # --------------------------
     # 每个 epoch 独立 tqdm
     for epoch in range(num_epochs):
-        sum_total = sum_diff = sum_coord = sum_feat = sum_kl = sum_bond = sum_atom = 0.0
-        sum_gcoord = sum_gfeat = 0.0
+        sum_total = sum_diff = sum_kl = sum_bond = sum_atom = 0.0
         batches_in_epoch = 0
 
         if use_tqdm:
@@ -138,16 +143,10 @@ def run_train(args):
             # 累计 loss
             sum_total += float(logs.get('total_loss', 0.0))
             sum_diff += float(logs.get('diffusion_loss', 0.0))
-            sum_coord += float(logs.get('coord_loss', 0.0))
-            sum_feat += float(logs.get('feat_loss', 0.0))
             sum_kl += float(logs.get('kl_loss', 0.0))
             sum_bond += float(logs.get('bond_loss', 0.0))
             sum_atom += float(logs.get('atom_type_loss', 0.0))
-            # drop tau stats from epoch aggregation
             batches_in_epoch += 1
-            # accumulate grad norms (post-backward, pre-step)
-            sum_gcoord += float(logs.get('grad_coord', 0.0))
-            sum_gfeat += float(logs.get('grad_feat', 0.0))
 
             if use_tqdm:
                 pbar.update(1)
@@ -159,26 +158,20 @@ def run_train(args):
         if batches_in_epoch > 0:
             avg_total = sum_total / batches_in_epoch
             avg_diff = sum_diff / batches_in_epoch
-            avg_coord = sum_coord / batches_in_epoch
-            avg_feat = sum_feat / batches_in_epoch
             avg_kl = sum_kl / batches_in_epoch
             avg_bond = sum_bond / batches_in_epoch
             avg_atom = sum_atom / batches_in_epoch
-            avg_gcoord = sum_gcoord / batches_in_epoch
-            avg_gfeat = sum_gfeat / batches_in_epoch
-            # drop tau stats from epoch aggregation
 
             logger.info(
                 f"epoch={epoch+1}/{num_epochs} avg_total={avg_total:.4f} "
-                f"avg_diff={avg_diff:.4f} avg_coord={avg_coord:.4f} avg_feat={avg_feat:.4f} "
-                f"avg_kl={avg_kl:.4f} avg_bond={avg_bond:.4f} avg_atom={avg_atom:.4f} "
-                f"avg_gcoord={avg_gcoord:.4e} avg_gfeat={avg_gfeat:.4e}"
+                f"avg_diff={avg_diff:.4f} avg_kl={avg_kl:.4f} "
+                f"avg_bond={avg_bond:.4f} avg_atom={avg_atom:.4f}"
             )
 
             # 写 CSV
             try:
                 with open(epoch_csv_path, 'a', encoding='utf-8') as f:
-                    f.write(f"{epoch+1},{avg_total:.6f},{avg_diff:.6f},{avg_coord:.6f},{avg_feat:.6f},"
+                    f.write(f"{epoch+1},{avg_total:.6f},{avg_diff:.6f},"
                             f"{avg_kl:.6f},{avg_bond:.6f},{avg_atom:.6f}\n")
             except Exception:
                 pass
@@ -284,120 +277,14 @@ def run_sample_conditional(args):
     cnt = 0
     use_tqdm = bool(getattr(args, 'tqdm', True))
     loader_iter = tqdm((test_loader or train_loader), desc='sample', total=len(test_loader or train_loader)) if use_tqdm else (test_loader or train_loader)
-
-    # helper: unwrap possible dict/list wrappers → Data/Batch
-    def _unwrap_debug(obj):
-        if obj is None:
-            return None
-        if isinstance(obj, dict):
-            for k in ('data', 'batch'):
-                if k in obj and obj[k] is not None:
-                    return obj[k]
-            for v in obj.values():
-                try:
-                    if hasattr(v, 'x') or hasattr(v, 'pos') or hasattr(v, 'ligand_pos'):
-                        return v
-                except Exception:
-                    continue
-            return obj
-        if isinstance(obj, (list, tuple)):
-            for it in obj:
-                if it is not None:
-                    return _unwrap_debug(it)
-        return obj
     for batch in loader_iter:
         if batch is None:
             continue
         batch = move_to_device(batch, args.device)
-        bb = _unwrap_debug(batch)
-        # edge-free sampling flag
-        if bool(getattr(args, 'edge_free_sampling', False)):
-            try:
-                setattr(bb, '_edge_free', True)
-            except Exception:
-                pass
-        # Write reference from the actual batch we are sampling (only once)
-        if cnt == 0:
-            try:
-                ref_dir = os.path.join('experiments', 'reference')
-                os.makedirs(ref_dir, exist_ok=True)
-                lig_pos = getattr(bb, 'ligand_pos', None)
-                lig_el = getattr(bb, 'ligand_element', None)
-                if isinstance(lig_pos, torch.Tensor) and lig_pos.ndim == 2 and lig_pos.size(0) > 0 and lig_pos.size(1) == 3:
-                    coords = lig_pos.detach().cpu().numpy()
-                    symbols = None
-                    if isinstance(lig_el, torch.Tensor) and lig_el.numel() == lig_pos.size(0):
-                        try:
-                            from rdkit import Chem
-                            pt = Chem.GetPeriodicTable()
-                            z = lig_el.detach().cpu().to(torch.long).numpy().tolist()
-                            symbols = [pt.GetElementSymbol(int(max(1, zi))) if int(zi) > 0 else 'C' for zi in z]
-                        except Exception:
-                            pass
-                    if symbols is None:
-                        symbols = ['C'] * coords.shape[0]
-                    from src.evaluation.utils_pdb_writer import build_rdkit_mol_from_coords, write_rdkit_mol_sdf
-                    mol = build_rdkit_mol_from_coords(symbols, coords)
-                    ref_path = os.path.join(ref_dir, 'reference_00000.sdf')
-                    write_rdkit_mol_sdf(mol, ref_path)
-                    print(f"Saved reference ligand SDF to {ref_path}")
-            except Exception as e:
-                print(f"Warning: failed to write reference ligand SDF: {e}")
-        sampler.sample_and_write(model, bb, out_dir=sdf_dir, num_samples=int(args.num_samples), prefix='lig', use_multi_modal=True)
+        sampler.sample_and_write(model, batch, out_dir=sdf_dir, num_samples=int(args.num_samples), prefix='lig', use_multi_modal=True)
         cnt += 1
         if cnt >= 1:
             break
-
-    # Compare generated vs reference coordinates (if available)
-    try:
-        ref_dir = os.path.join('experiments', 'reference')
-        ref_path = os.path.join(ref_dir, 'reference_00000.sdf')
-        gen0_path = os.path.join(sdf_dir, 'lig_00000.sdf')
-        if os.path.isfile(ref_path) and os.path.isfile(gen0_path):
-            from rdkit import Chem
-            import numpy as np
-            def _load_coords(sdf_path):
-                suppl = Chem.SDMolSupplier(sdf_path, removeHs=True, sanitize=False)
-                for m in suppl:
-                    if m is None:
-                        continue
-                    if m.GetNumConformers() == 0:
-                        continue
-                    conf = m.GetConformer()
-                    n = m.GetNumAtoms()
-                    xyz = np.zeros((n, 3), dtype=float)
-                    for i in range(n):
-                        p = conf.GetAtomPosition(i)
-                        xyz[i, 0] = p.x; xyz[i, 1] = p.y; xyz[i, 2] = p.z
-                    return xyz
-                return None
-            X = _load_coords(ref_path)
-            Y = _load_coords(gen0_path)
-            if X is not None and Y is not None and X.shape[0] == Y.shape[0] and X.shape[0] > 0:
-                # raw stats
-                def _stats(Z):
-                    return dict(mean=Z.mean(axis=0).tolist(), std=Z.std(axis=0).tolist(), min=Z.min(axis=0).tolist(), max=Z.max(axis=0).tolist())
-                # center
-                Xc = X - X.mean(axis=0, keepdims=True)
-                Yc = Y - Y.mean(axis=0, keepdims=True)
-                # Kabsch
-                H = Xc.T @ Yc
-                U, S, Vt = np.linalg.svd(H)
-                R = Vt.T @ U.T
-                if np.linalg.det(R) < 0:
-                    Vt2 = Vt.copy(); Vt2[-1, :] *= -1.0
-                    R = Vt2.T @ U.T
-                Yc_aligned = (Yc @ R.T)
-                rmsd_raw = float(np.sqrt(((X - Y) ** 2).sum(axis=1).mean()))
-                rmsd_centered = float(np.sqrt(((Xc - Yc) ** 2).sum(axis=1).mean()))
-                rmsd_kabsch = float(np.sqrt(((Xc - Yc_aligned) ** 2).sum(axis=1).mean()))
-                print('[REF-COMP] N_atoms=', X.shape[0], 'raw_RMSD=', rmsd_raw, 'centered_RMSD=', rmsd_centered, 'kabsch_RMSD=', rmsd_kabsch)
-            else:
-                print('[REF-COMP] Skip: coord load failed or atom counts mismatch.')
-        else:
-            print('[REF-COMP] Skip: missing ref/gen files.')
-    except Exception as e:
-        print(f"[REF-COMP] comparison failed: {e}")
 
     # evaluations (full chain when possible)
     gen_smiles = sdf_dir_to_smiles(sdf_dir)
