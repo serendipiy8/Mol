@@ -316,9 +316,42 @@ class ConditionalSampler:
                     print("WARNING: logits batch size does not match n_atoms")
                 elements = self._map_classes_to_elements(logits.argmax(dim=-1))
 
-            # Always write coords-only SDF (no bonds). Any bonding will be done by downstream geometric heuristics.
+            # Build RDKit Mol from coords, then add reasonable bonds by distance/valence heuristics
             from rdkit import Chem
             mol = build_rdkit_mol_from_coords(elements, coords)
+            # Guess bonds
+            try:
+                ei = self._guess_bonds_by_distance(elements, coords, scale=1.15)
+            except Exception:
+                ei = None
+            if isinstance(ei, torch.Tensor) and ei.numel() > 0 and ei.size(0) == 2:
+                try:
+                    edge_index = ei
+                    edge_type = torch.ones(edge_index.size(1), dtype=torch.long)
+                    # prune by simple valence constraints
+                    edge_index, edge_type = self._prune_by_valence(edge_index, edge_type, elements)
+                    # add SINGLE bonds to mol
+                    from rdkit.Chem import rdchem
+                    rw = Chem.RWMol(mol)
+                    E = edge_index.size(1)
+                    for k in range(E):
+                        a = int(edge_index[0, k].item())
+                        b = int(edge_index[1, k].item())
+                        if a == b:
+                            continue
+                        if a > b:
+                            a, b = b, a
+                        if a < 0 or b < 0 or a >= rw.GetNumAtoms() or b >= rw.GetNumAtoms():
+                            continue
+                        if rw.GetBondBetweenAtoms(a, b) is not None:
+                            continue
+                        try:
+                            rw.AddBond(a, b, rdchem.BondType.SINGLE)
+                        except Exception:
+                            continue
+                    mol = rw.GetMol()
+                except Exception:
+                    pass
             sdf_path = os.path.join(out_dir, f"{prefix}_{i:05d}.sdf")
             try:
                 Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_PROPERTIES | Chem.SanitizeFlags.SANITIZE_SYMMRINGS)

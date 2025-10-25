@@ -1,6 +1,6 @@
 Metric,Value,Description
-Internal Similarity (Mean),1.000,Average pairwise similarity among generated molecules
-Internal Similarity (Std),0.000,Standard deviation of pairwise similarities
+Internal Similarity (Mean),0.733,Average pairwise similarity among generated molecules
+Internal Similarity (Std),0.189,Standard deviation of pairwise similarities
 External Similarity (Mean),0.000,Average similarity to reference molecules
-Internal Diversity,0.000,1 - average pairwise similarity
-Diversity Index,-0.000,Entropy-based diversity measure
+Internal Diversity,0.267,1 - average pairwise similarity
+Diversity Index,0.637,Entropy-based diversity measure

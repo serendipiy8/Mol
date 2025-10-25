@@ -1,15 +1,15 @@
 {
-  "single": 0,
+  "single": 93,
   "double": 0,
   "triple": 0,
   "aromatic": 0,
   "other": 0,
-  "ring_bonds": 0,
-  "total_bonds": 0,
+  "ring_bonds": 93,
+  "total_bonds": 93,
   "sanitize_fail": 0,
   "num_molecules": 3,
-  "avg_bonds_per_mol": 0.0,
+  "avg_bonds_per_mol": 31.0,
   "aromatic_ratio": 0.0,
-  "ring_bond_ratio": 0.0,
+  "ring_bond_ratio": 1.0,
   "sanitize_fail_rate": 0.0
 }

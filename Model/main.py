@@ -54,8 +54,8 @@ def main():
 
     # trainer
     parser.add_argument('--num_epochs', type=int, default=100)
-    parser.add_argument('--train_fraction', type=float, default=0.5)
-    parser.add_argument('--train_limit', type=int, default=1000000)
+    parser.add_argument('--train_fraction', type=float, default=0.1)
+    parser.add_argument('--train_limit', type=int, default=10)
     parser.add_argument('--test_limit', type=int, default=3)
     parser.add_argument('--lr', type=float, default=3e-3)
     parser.add_argument('--aggregate_all_t', action='store_true', default=False)

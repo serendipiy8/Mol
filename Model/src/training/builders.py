@@ -58,7 +58,7 @@ def build_model_and_trainer(args, node_dim: int, device: torch.device):
         device=str(device)
     )
     # 提升早期梯度：切换为 MSE（后续可再改回 Huber）
-    loss_fn = DiffusionLoss(loss_type='mse', reweighting=True, w_max=1e2)
+    loss_fn = DiffusionLoss(loss_type='mse', reweighting=False, w_max=1e2)
     # Two-group optimizer: boost coordinate-related layers' LR
     base_lr = float(getattr(args, 'lr', 3e-4))
     coord_params = []
@@ -73,7 +73,7 @@ def build_model_and_trainer(args, node_dim: int, device: torch.device):
     # revert coord head to base lr for stability; can tune later
     optimizer = torch.optim.Adam([
         { 'params': base_params, 'lr': base_lr },
-        { 'params': coord_params, 'lr': base_lr * 4.0 },
+        { 'params': coord_params, 'lr': base_lr  },
     ])
     # If coord_debug is enabled, force single-step aggregation for detailed prints
     agg_all = bool(args.aggregate_all_t)
