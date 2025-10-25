@@ -73,7 +73,7 @@ class EGNNDenoiser(nn.Module):
                  use_bond_head: bool = True, bond_hidden: int = 128, bond_classes: int = 2, bond_radius: float = 2.2,
                  use_atom_type_head: bool = True, atom_type_classes: int = 10,
                  use_dual_branch: bool = True, coord_use_tanh: bool = False, coord_alpha_min: float = 0.1,
-                 debug_graph: bool = False):
+                 debug_graph: bool = False, feat_use_s_gate: bool = True):
         super().__init__()
         self.use_time = use_time
         self.use_s_gate = use_s_gate
@@ -84,6 +84,7 @@ class EGNNDenoiser(nn.Module):
         self.coord_use_tanh = bool(coord_use_tanh)
         self.coord_alpha_min = float(coord_alpha_min)
         self.debug_graph = bool(debug_graph)
+        self.feat_use_s_gate = bool(feat_use_s_gate)
         if self.use_dual_branch:
             # 更强坐标更新：坐标分支关闭度归一化，增强位移与梯度；特征分支保留度归一化稳定特征学习
             self.coord_layers = nn.ModuleList([
@@ -164,9 +165,12 @@ class EGNNDenoiser(nn.Module):
         self.use_atom_type_head = use_atom_type_head
         self.atom_type_classes = int(atom_type_classes)
         if self.use_atom_type_head:
-            self.atom_type_head = nn.Linear(hidden_dim, self.atom_type_classes)
+            self.atom_type_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, self.atom_type_classes)
+            )
 
-        # q_phi: tau parameter head (predict mu, log_sigma per ligand node)
         # Uses ligand raw features (node_dim) and global protein context (hidden_dim)
         self.qphi_feat_proj = nn.Linear(node_dim, hidden_dim)
         self.qphi_ctx_proj = nn.Linear(hidden_dim, hidden_dim)
@@ -539,7 +543,7 @@ class EGNNDenoiser(nn.Module):
                         xhid_c[Np:Np+Nl] = h_l_out
                 # run feat branch (ignore its pos updates)
                 for layer_idx, layer in enumerate(self.feat_layers):
-                    xhid_f, _ = layer(xhid_f, pos_f, edge_index, edge_attr, s=s_all if self.use_s_gate else None)
+                    xhid_f, _ = layer(xhid_f, pos_f, edge_index, edge_attr, s=(s_all if (self.use_s_gate and self.feat_use_s_gate) else None))
                     if self.use_cross_mp and self.cross_mp is not None and ((layer_idx + 1) % self.cross_mp_every == 0):
                         h_prot_cur = xhid_f[:Np]
                         h_lig_cur = xhid_f[Np:Np+Nl]
@@ -566,7 +570,6 @@ class EGNNDenoiser(nn.Module):
                 branches.append(('coord_feat', (xhid_c, pos_c, xhid_f)))
 
             if not self.use_dual_branch:
-                # original single branch
                 for layer_idx, layer in enumerate(self.layers):
                     xhid, pos = layer(xhid, pos, edge_index, edge_attr, s=s_all if self.use_s_gate else None)
                     if self.use_cross_mp and self.cross_mp is not None and ((layer_idx + 1) % self.cross_mp_every == 0):
@@ -607,11 +610,7 @@ class EGNNDenoiser(nn.Module):
                 x_lig_c = xhid_c[Np:Np+Nl]
                 x_lig_f = xhid_f[Np:Np+Nl]
             # removed verbose forward debug prints
-            # Predict coordinates as residual on x_t with step-dependent scale and limiting
-            # 强力残差头：直接对 x_t 回归 Δ，增强坐标梯度
             x0_pred = x_t + self.out_coord(x_lig_c)
-            # optional tiny residual refinement (disabled by default):
-            # x0_pred = x0_pred + 0.1 * self.out_coord(x_lig_c)
             h0_pred = self.out_feat(x_lig_f)
 
             # reduce per-iteration prints
@@ -666,7 +665,7 @@ class EGNNDenoiser(nn.Module):
             for layer in self.coord_layers:
                 x_c, pos_c = layer(x_c, pos_c, edge_index, edge_attr, s=s_t if self.use_s_gate else None)
             for layer in self.feat_layers:
-                x_f, _ = layer(x_f, pos, edge_index, edge_attr, s=s_t if self.use_s_gate else None)
+                x_f, _ = layer(x_f, pos, edge_index, edge_attr, s=(s_t if (self.use_s_gate and self.feat_use_s_gate) else None))
 
 
         # 强力残差头（ligand-only）：对 x_t 回归 Δ

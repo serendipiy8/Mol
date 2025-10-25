@@ -45,9 +45,10 @@ def build_model_and_trainer(args, node_dim: int, device: torch.device):
         use_atom_type_head=bool(getattr(args, 'use_atom_type_head', True)),
         atom_type_classes=int(getattr(args, 'atom_type_classes', 10)),
         use_dual_branch=bool(getattr(args, 'use_dual_branch', True)),
-        coord_use_tanh=bool(getattr(args, 'coord_use_tanh', False)),
+        coord_use_tanh=bool(getattr(args, 'coord_use_tanh', True)),
         coord_alpha_min=float(getattr(args, 'coord_alpha_min', 0.3)),
         debug_graph=bool(getattr(args, 'debug_graph', False)),
+        feat_use_s_gate=bool(getattr(args, 'feat_use_s_gate', True)),
     ).to(device)
 
     diffusion = SoftMaskDiffusionProcess(
@@ -57,23 +58,25 @@ def build_model_and_trainer(args, node_dim: int, device: torch.device):
         sigma_schedule='linear',
         device=str(device)
     )
-    # 提升早期梯度：切换为 MSE（后续可再改回 Huber）
-    loss_fn = DiffusionLoss(loss_type='mse', reweighting=True, w_max=1e2)
-    # Two-group optimizer: boost coordinate-related layers' LR
+    loss_fn = DiffusionLoss(loss_type='mse', reweighting=True, w_max=20)
     base_lr = float(getattr(args, 'lr', 3e-4))
     coord_params = []
+    feat_params = []
     base_params = []
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
         if ('out_coord' in name) or ('coord_mlp' in name):
             coord_params.append(p)
+        elif ('feat_layers' in name) or ('out_feat' in name) or ('atom_type_head' in name):
+            feat_params.append(p)
         else:
             base_params.append(p)
     # revert coord head to base lr for stability; can tune later
     optimizer = torch.optim.Adam([
         { 'params': base_params, 'lr': base_lr },
         { 'params': coord_params, 'lr': base_lr * 4.0 },
+        { 'params': feat_params,  'lr': base_lr * 2.0 },
     ])
     # If coord_debug is enabled, force single-step aggregation for detailed prints
     agg_all = bool(args.aggregate_all_t)
@@ -103,5 +106,7 @@ def build_model_and_trainer(args, node_dim: int, device: torch.device):
         coord_debug=bool(getattr(args, 'coord_debug', False)),
         tau_as_t=bool(getattr(args, 'tau_as_t', False)),
         kappa=float(getattr(args, 'kappa', 5.0)),
+        tau_window=int(getattr(args, 'tau_window', 100)),
+        fix_tau_per_graph=bool(getattr(args, 'fix_tau_per_graph', True)),
     )
     return model, trainer, diffusion

@@ -21,7 +21,8 @@ class DiffusionTrainer:
                  lambda_atom_type: float = 0.0,
                  lambda_bond: float = 0.1,
                  debug_atom_type: bool = False,
-                 normalize_coord_loss: bool = False, coord_use_kabsch: bool = True, coord_debug: bool = False, tau_as_t: bool = False, kappa: float = 5.0):
+                 normalize_coord_loss: bool = False, coord_use_kabsch: bool = True, coord_debug: bool = False, tau_as_t: bool = False, kappa: float = 5.0,
+                 tau_window: int = 100, fix_tau_per_graph: bool = False):
 
         self.diffusion_process = diffusion_process
         self.loss_fn = loss_fn
@@ -47,6 +48,14 @@ class DiffusionTrainer:
         self.coord_debug = bool(coord_debug)
         self.tau_as_t = bool(tau_as_t)
         self.kappa = float(kappa)
+        # tau sampling stabilization across epochs: freeze epsilon within windows of epochs
+        self.tau_window = int(tau_window) if isinstance(tau_window, int) else 2
+        self.current_epoch = 0
+        self.fix_tau_per_graph = bool(fix_tau_per_graph)
+        self.tau_cache = {}
+
+    def set_epoch(self, epoch_idx: int) -> None:
+        self.current_epoch = int(epoch_idx)
 
     @staticmethod
     def _infer_element_labels_from_feat(feat: torch.Tensor) -> Optional[torch.Tensor]:
@@ -201,10 +210,17 @@ class DiffusionTrainer:
         if ligand_pos is None:
             raise ValueError('Batch must contain ligand_pos tensor')
 
-    def _sample_tau_logistic_normal(self, mu: torch.Tensor, log_sigma: torch.Tensor) -> torch.Tensor:
-        # Logistic-Normal reparam: tau = sigmoid(mu + exp(clamp(log_sigma))*eps)
-        eps = torch.randn_like(mu)
+    def _sample_tau_logistic_normal(self, mu: torch.Tensor, log_sigma: torch.Tensor, bidx: Optional[int] = None) -> torch.Tensor:
+        # Logistic-Normal reparam with optional epoch-window seeding
         sigma = torch.exp(torch.clamp(log_sigma, min=-10.0, max=10.0))
+        if self.tau_window is not None and self.tau_window > 0:
+            window_id = int(self.current_epoch // self.tau_window)
+            base_seed = 1000003 * window_id + 9176 * int(bidx or 0)
+            gen = torch.Generator(device=mu.device)
+            gen.manual_seed(base_seed)
+            eps = torch.randn(mu.shape, device=mu.device, generator=gen, dtype=mu.dtype)
+        else:
+            eps = torch.randn_like(mu)
         u = mu + sigma * eps
         return torch.sigmoid(u)
 
@@ -402,7 +418,28 @@ class DiffusionTrainer:
             tau_mu, tau_log_sigma = tau_params
             tau_mu = tau_mu.to(self.device)
             tau_log_sigma = tau_log_sigma.to(self.device)
-            tau = self._sample_tau_logistic_normal(tau_mu, tau_log_sigma)
+            # 固定每图 tau（跨多个 epoch 下降），可选（优先使用全局缓存，其次 batch 局部）
+            graph_id = getattr(batch, 'graph_id', None)
+            if graph_id is None:
+                graph_id = getattr(batch, '_graph_id', None)
+            cached = None
+            if self.fix_tau_per_graph and (graph_id is not None) and (graph_id in self.tau_cache):
+                cached = self.tau_cache.get(graph_id, None)
+            if isinstance(cached, torch.Tensor) and cached.numel() == tau_mu.numel():
+                tau = cached.to(self.device)
+            else:
+                tau_fixed_local = getattr(batch, '_tau_fixed', None) if self.fix_tau_per_graph else None
+                if isinstance(tau_fixed_local, torch.Tensor) and tau_fixed_local.numel() == tau_mu.numel():
+                    tau = tau_fixed_local.to(self.device)
+                else:
+                    bidx_hint = getattr(batch, '_batch_index', 0)
+                    tau = self._sample_tau_logistic_normal(tau_mu, tau_log_sigma, bidx=bidx_hint)
+                    if self.fix_tau_per_graph and (graph_id is not None):
+                        self.tau_cache[graph_id] = tau.detach()
+                        try:
+                            setattr(batch, '_tau_fixed', tau.detach())
+                        except Exception:
+                            pass
             batch.tau_mu = tau_mu
             batch.tau_log_sigma = tau_log_sigma
         else:
@@ -418,8 +455,19 @@ class DiffusionTrainer:
 
         # 采样时间步
         if not self.aggregate_all_t:
-            t_scalar = torch.randint(0, self.diffusion_process.num_steps, (1,), device=self.device, dtype=torch.long).item()
+            # allow runner to override t for graph-mode inner loops
+            t_override = getattr(batch, '_override_t', None)
+            if isinstance(t_override, int):
+                t_scalar = int(t_override)
+            else:
+                t_scalar = torch.randint(0, self.diffusion_process.num_steps, (1,), device=self.device, dtype=torch.long).item()
             t = torch.full((x0.size(0),), t_scalar, device=self.device, dtype=torch.long)
+            # 可选：将 tau 绑定当前 t（tau_as_t 模式）
+            if self.tau_as_t:
+                # 线性 alpha 近似到 [0,1]，与 SoftMaskTransform 的默认线性一致
+                alpha_bind = (t.to(torch.float32) / float(max(1, self.diffusion_process.num_steps - 1)))
+                tau = alpha_bind.to(self.device)
+                batch.tau = tau
             self._assert_shapes_pre(x0, tau, t)
 
         # 模型调用封装
@@ -467,6 +515,7 @@ class DiffusionTrainer:
                 try:
                     alpha = (t.to(torch.float32) / float(max(1, self.diffusion_process.num_steps - 1)))
                     sigma_t = self.diffusion_process.get_sigma_t(t)
+                    # 改为 s = sigmoid(kappa * (alpha(t) - tau))
                     s_new = torch.sigmoid(self.kappa * (tau.to(alpha.device, alpha.dtype) - alpha)).to(s_t.dtype)
                     denom = (1.0 - s_t).unsqueeze(-1) * sigma_t.unsqueeze(-1) + 1e-8
                     eps_c = (x_t - s_t.unsqueeze(-1) * x0) / denom
@@ -528,6 +577,25 @@ class DiffusionTrainer:
                 return x_gt, x_pr
 
             x0_use, x0_pred_use = _maybe_norm(x0, x0_pred)
+            # Optional Kabsch alignment (remove global rotation)
+            if self.coord_use_kabsch:
+                try:
+                    X = x0_use
+                    Y = x0_pred_use
+                    Xc = X - X.mean(dim=0, keepdim=True)
+                    Yc = Y - Y.mean(dim=0, keepdim=True)
+                    H = Yc.transpose(0, 1) @ Xc  # align Y -> X
+                    U, S, Vt = torch.linalg.svd(H)
+                    R = Vt.transpose(0, 1) @ U.transpose(0, 1)
+                    if torch.det(R) < 0:
+                        Vt2 = Vt.clone()
+                        Vt2[-1, :] = -Vt2[-1, :]
+                        R = Vt2.transpose(0, 1) @ U.transpose(0, 1)
+                    Yc_aligned = Yc @ R
+                    x0_pred_use = Yc_aligned
+                    x0_use = Xc
+                except Exception:
+                    pass
             if has_feat and h0_pred is not None:
                 coord_loss_val = self.loss_fn.compute_loss(x0_use, x0_pred_use, s_t, sigma_coord)
                 feat_loss_val = self.loss_fn.compute_loss(h0, h0_pred, s_t, sigma_feat)
@@ -549,6 +617,10 @@ class DiffusionTrainer:
             steps_count = 0
             for t_val in range(num_steps):
                 t_loop = torch.full((x0.size(0),), t_val, device=self.device, dtype=torch.long)
+                if self.tau_as_t:
+                    alpha_bind = (t_loop.to(torch.float32) / float(max(1, self.diffusion_process.num_steps - 1)))
+                    tau = alpha_bind.to(self.device)
+                    batch.tau = tau
                 self._assert_shapes_pre(x0, tau, t_loop)
 
                 if has_feat:
@@ -569,11 +641,29 @@ class DiffusionTrainer:
                     else:
                         x0_pred, h0_pred = model_out, None
                     self._assert_model_outputs(x0_pred, x0, h0_pred, h0)
-
+                    
                     sigma_coord = self.diffusion_process.sigmas[t_loop]
                     sigma_feat = self.diffusion_process.sigmas[t_loop]
-
+                    
                     x0_use, x0_pred_use = _maybe_norm(x0, x0_pred)
+                    if self.coord_use_kabsch:
+                        try:
+                            X = x0_use
+                            Y = x0_pred_use
+                            Xc = X - X.mean(dim=0, keepdim=True)
+                            Yc = Y - Y.mean(dim=0, keepdim=True)
+                            H = Yc.transpose(0, 1) @ Xc
+                            U, S, Vt = torch.linalg.svd(H)
+                            R = Vt.transpose(0, 1) @ U.transpose(0, 1)
+                            if torch.det(R) < 0:
+                                Vt2 = Vt.clone()
+                                Vt2[-1, :] = -Vt2[-1, :]
+                                R = Vt2.transpose(0, 1) @ U.transpose(0, 1)
+                            Yc_aligned = Yc @ R
+                            x0_pred_use = Yc_aligned
+                            x0_use = Xc
+                        except Exception:
+                            pass
                     if h0_pred is not None:
                         coord_step = self.loss_fn.compute_loss(x0_use, x0_pred_use, s_t, sigma_coord)
                         feat_step = self.loss_fn.compute_loss(h0, h0_pred, s_t, sigma_feat)
@@ -675,7 +765,14 @@ class DiffusionTrainer:
                         pal_expand = palette.unsqueeze(0).to(torch.float32)
                         dist = torch.abs(z_expand - pal_expand)
                         labels = torch.argmin(dist, dim=-1)
-                        atom_type_loss = F.cross_entropy(atom_logits, labels)
+                        # class imbalance handling: batch-adaptive class weights (inverse sqrt frequency)
+                        num_classes = int(getattr(model, 'atom_type_classes', 10)) if model is not None else 10
+                        counts = torch.bincount(labels, minlength=num_classes).to(torch.float32)
+                        counts = torch.clamp(counts, min=1.0)
+                        weights = 1.0 / torch.sqrt(counts)
+                        # normalize weights to mean 1 to keep loss scale stable
+                        weights = weights * (weights.numel() / (weights.sum() + 1e-8))
+                        atom_type_loss = F.cross_entropy(atom_logits, labels, weight=weights.to(atom_logits.device))
             except Exception:
                 atom_type_loss = torch.tensor(0.0, device=self.device)
 
@@ -698,11 +795,15 @@ class DiffusionTrainer:
         # gradient norms (coord vs feat) before optimizer.step()
         grad_coord = torch.tensor(0.0, device=self.device)
         grad_feat = torch.tensor(0.0, device=self.device)
+        grad_bond = torch.tensor(0.0, device=self.device)
+        grad_atom = torch.tensor(0.0, device=self.device)
         try:
             # model is passed to training_step; compute by name grouping
             if model is not None:
                 coord_sq = 0.0
                 feat_sq = 0.0
+                bond_sq = 0.0
+                atom_sq = 0.0
                 for name, p in model.named_parameters():
                     if p.grad is None:
                         continue
@@ -711,8 +812,14 @@ class DiffusionTrainer:
                         coord_sq += g2
                     elif ('feat_layers' in name) or ('out_feat' in name):
                         feat_sq += g2
+                    elif ('bond_head' in name):
+                        bond_sq += g2
+                    elif ('atom_type_head' in name):
+                        atom_sq += g2
                 grad_coord = torch.tensor(coord_sq ** 0.5, device=self.device)
                 grad_feat = torch.tensor(feat_sq ** 0.5, device=self.device)
+                grad_bond = torch.tensor(bond_sq ** 0.5, device=self.device)
+                grad_atom = torch.tensor(atom_sq ** 0.5, device=self.device)
         except Exception:
             pass
         self.optimizer.step()
@@ -729,6 +836,8 @@ class DiffusionTrainer:
             'tau_rank_loss': float(tau_rank_loss.item()) if isinstance(tau_rank_loss, torch.Tensor) else 0.0,
             'grad_coord': float(grad_coord.item()) if isinstance(grad_coord, torch.Tensor) else 0.0,
             'grad_feat': float(grad_feat.item()) if isinstance(grad_feat, torch.Tensor) else 0.0,
+            'grad_bond': float(grad_bond.item()) if isinstance(grad_bond, torch.Tensor) else 0.0,
+            'grad_atom': float(grad_atom.item()) if isinstance(grad_atom, torch.Tensor) else 0.0,
         }
         if t_scalar_log is not None:
             out_logs['t'] = t_scalar_log

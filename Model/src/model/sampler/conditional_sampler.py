@@ -259,7 +259,7 @@ class ConditionalSampler:
 
     @torch.no_grad()
     def sample_and_write(self, model, batch: Data, out_dir: str, num_samples: int = 1,
-                         prefix: str = 'lig', use_multi_modal: bool = False) -> List[str]:
+                         prefix: str = 'lig', use_multi_modal: bool = False, start_idx: int = 0) -> List[str]:
         os.makedirs(out_dir, exist_ok=True)
         sdf_paths: List[str] = []
 
@@ -314,12 +314,58 @@ class ConditionalSampler:
                 print("DEBUG sample_and_write -> atom_type_head logits shape:", logits.shape)
                 if logits.size(0) != n_atoms:
                     print("WARNING: logits batch size does not match n_atoms")
-                elements = self._map_classes_to_elements(logits.argmax(dim=-1))
+                # confidence-gated replacement to avoid collapse to a single class
+                with torch.no_grad():
+                    probs = torch.softmax(logits, dim=-1)
+                    conf, cls = probs.max(dim=-1)
+                    pred_syms = self._map_classes_to_elements(cls)
+                    elements_gate: List[str] = []
+                    thr = 0.5
+                    for ii in range(n_atoms):
+                        ci = float(conf[ii].item()) if ii < conf.size(0) else 0.0
+                        if ci >= thr:
+                            elements_gate.append(pred_syms[ii])
+                        else:
+                            elements_gate.append(elements[ii])
+                    elements = elements_gate
 
-            # Always write coords-only SDF (no bonds). Any bonding will be done by downstream geometric heuristics.
+            # Build RDKit Mol from coords, then add reasonable bonds by distance/valence heuristics
             from rdkit import Chem
             mol = build_rdkit_mol_from_coords(elements, coords)
-            sdf_path = os.path.join(out_dir, f"{prefix}_{i:05d}.sdf")
+            # Guess bonds
+            try:
+                ei = self._guess_bonds_by_distance(elements, coords, scale=1.15)
+            except Exception:
+                ei = None
+            if isinstance(ei, torch.Tensor) and ei.numel() > 0 and ei.size(0) == 2:
+                try:
+                    edge_index = ei
+                    edge_type = torch.ones(edge_index.size(1), dtype=torch.long)
+                    # prune by simple valence constraints
+                    edge_index, edge_type = self._prune_by_valence(edge_index, edge_type, elements)
+                    # add SINGLE bonds to mol
+                    from rdkit.Chem import rdchem
+                    rw = Chem.RWMol(mol)
+                    E = edge_index.size(1)
+                    for k in range(E):
+                        a = int(edge_index[0, k].item())
+                        b = int(edge_index[1, k].item())
+                        if a == b:
+                            continue
+                        if a > b:
+                            a, b = b, a
+                        if a < 0 or b < 0 or a >= rw.GetNumAtoms() or b >= rw.GetNumAtoms():
+                            continue
+                        if rw.GetBondBetweenAtoms(a, b) is not None:
+                            continue
+                        try:
+                            rw.AddBond(a, b, rdchem.BondType.SINGLE)
+                        except Exception:
+                            continue
+                    mol = rw.GetMol()
+                except Exception:
+                    pass
+            sdf_path = os.path.join(out_dir, f"{prefix}_{(start_idx + i):05d}.sdf")
             try:
                 Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_PROPERTIES | Chem.SanitizeFlags.SANITIZE_SYMMRINGS)
             except Exception:

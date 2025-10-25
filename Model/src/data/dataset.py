@@ -305,9 +305,8 @@ class CrossDockedDataset:
             idx = idx[0] if idx else 0
         
         try:
-            key = self.keys[idx]
-            if isinstance(key, str):
-                key = key.encode()
+            key_str = self.keys[idx]
+            key = key_str.encode() if isinstance(key_str, str) else key_str
             with self.db.begin(buffers=True) as txn:
                 raw = txn.get(key)
             raw_data = pickle.loads(bytes(raw)) if raw is not None else None
@@ -324,6 +323,11 @@ class CrossDockedDataset:
             
             # Convert to ProteinLigandData object
             data = ProteinLigandData()
+            # Stable graph identifier for caching purposes
+            try:
+                setattr(data, 'graph_id', str(key_str))
+            except Exception:
+                pass
             
             # Helper to pick first existing key from a list of candidates
             def _first_key(dct, candidates):
@@ -584,9 +588,8 @@ class PDBBindDataset:
             idx = idx[0] if idx else 0
         
         try:
-            key = self.keys[idx]
-            if isinstance(key, str):
-                key = key.encode()
+            key_str = self.keys[idx]
+            key = key_str.encode() if isinstance(key_str, str) else key_str
             with self.db.begin(buffers=True) as txn:
                 raw = txn.get(key)
             raw_data = pickle.loads(bytes(raw)) if raw is not None else None
@@ -602,6 +605,11 @@ class PDBBindDataset:
             
             # Convert to ProteinLigandData object
             data = ProteinLigandData()
+            # Stable graph identifier for caching purposes
+            try:
+                setattr(data, 'graph_id', str(key_str))
+            except Exception:
+                pass
             
             # Helper to pick first existing key from candidates
             def _first_key(dct, candidates):
