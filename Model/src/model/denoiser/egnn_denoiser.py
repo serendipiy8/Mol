@@ -85,6 +85,8 @@ class EGNNDenoiser(nn.Module):
         self.coord_alpha_min = float(coord_alpha_min)
         self.debug_graph = bool(debug_graph)
         self.feat_use_s_gate = bool(feat_use_s_gate)
+        # expose hidden_dim for downstream components (e.g., sampler)
+        self.hidden_dim = hidden_dim
         if self.use_dual_branch:
             # 更强坐标更新：坐标分支关闭度归一化，增强位移与梯度；特征分支保留度归一化稳定特征学习
             self.coord_layers = nn.ModuleList([

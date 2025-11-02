@@ -229,6 +229,30 @@ def run_train(args):
                                 f.write(f"{gid_str},{ge+1},{avg_total:.6f},{avg_diff:.6f},{avg_coord:.6f},{avg_feat:.6f},{avg_kl:.6f},{avg_bond:.6f},{avg_atom:.6f}\n")
                         except Exception:
                             pass
+                try:
+                    if hasattr(trainer, '_dbg_last_x0') and hasattr(trainer, '_dbg_last_xpred') and hasattr(trainer, '_dbg_last_xt'):
+                        x0_dbg = trainer._dbg_last_x0
+                        s_t_dbg = getattr(trainer, '_dbg_last_s_t', None)
+                        tau_dbg = getattr(trainer, '_dbg_last_tau', None)
+                        xpred_dbg = trainer._dbg_last_xpred
+                        xt_dbg = trainer._dbg_last_xt
+                        logger.info(f"[DBG-REPEAT] graph={getattr(bb, 'graph_id', getattr(bb, '_graph_id', bidx))} rep={rep+1}/{tau_repeats} x0={x0_dbg.shape} xpred={xpred_dbg.shape} xt={xt_dbg.shape}")
+                        nshow = min(5, x0_dbg.size(0))
+                        logger.info(f"x0_head: {x0_dbg[:nshow].numpy()}")
+                        logger.info(f"xpred_head: {xpred_dbg[:nshow].numpy()}")
+                        logger.info(f"xt_head: {xt_dbg[:nshow].numpy()}")
+                        if s_t_dbg is not None:
+                            try:
+                                logger.info(f"s_t_head: {s_t_dbg[:nshow].numpy()}")
+                            except Exception:
+                                logger.info(f"s_t_head: {s_t_dbg}")
+                        if tau_dbg is not None:
+                            try:
+                                logger.info(f"tau_head: {tau_dbg[:nshow].numpy()}")
+                            except Exception:
+                                logger.info(f"tau_head: {tau_dbg}")
+                except Exception:
+                    pass
             graph_counter += 1
 
         # after graph-mode training, save checkpoint and return
@@ -534,33 +558,86 @@ def run_sample_conditional(args):
                 setattr(bb, '_edge_free', True)
             except Exception:
                 pass
-        # Write reference from the actual batch we are sampling (only once)
-        if cnt == 0:
-            try:
-                ref_dir = os.path.join('experiments', 'reference')
-                os.makedirs(ref_dir, exist_ok=True)
-                lig_pos = getattr(bb, 'ligand_pos', None)
-                lig_el = getattr(bb, 'ligand_element', None)
-                if isinstance(lig_pos, torch.Tensor) and lig_pos.ndim == 2 and lig_pos.size(0) > 0 and lig_pos.size(1) == 3:
-                    coords = lig_pos.detach().cpu().numpy()
-                    symbols = None
+        # Write reference SDF for current batch (one per complex)
+        try:
+            ref_dir = os.path.join('experiments', 'reference')
+            os.makedirs(ref_dir, exist_ok=True)
+            lig_pos = getattr(bb, 'ligand_pos', None)
+            lig_el = getattr(bb, 'ligand_element', None)
+            lig_bi = getattr(bb, 'ligand_bond_index', None)
+            lig_bt = getattr(bb, 'ligand_bond_type', None)
+            if isinstance(lig_pos, torch.Tensor) and lig_pos.ndim == 2 and lig_pos.size(0) > 0 and lig_pos.size(1) == 3:
+                coords = lig_pos.detach().cpu().numpy()
+                symbols = None
+                try:
+                    from rdkit import Chem
+                    from rdkit.Chem import rdchem
+                    pt = Chem.GetPeriodicTable()
                     if isinstance(lig_el, torch.Tensor) and lig_el.numel() == lig_pos.size(0):
-                        try:
-                            from rdkit import Chem
-                            pt = Chem.GetPeriodicTable()
-                            z = lig_el.detach().cpu().to(torch.long).numpy().tolist()
-                            symbols = [pt.GetElementSymbol(int(max(1, zi))) if int(zi) > 0 else 'C' for zi in z]
-                        except Exception:
-                            pass
-                    if symbols is None:
-                        symbols = ['C'] * coords.shape[0]
-                    from src.evaluation.utils_pdb_writer import build_rdkit_mol_from_coords, write_rdkit_mol_sdf
-                    mol = build_rdkit_mol_from_coords(symbols, coords)
-                    ref_path = os.path.join(ref_dir, 'reference_00000.sdf')
-                    write_rdkit_mol_sdf(mol, ref_path)
-                    print(f"Saved reference ligand SDF to {ref_path}")
-            except Exception as e:
-                print(f"Warning: failed to write reference ligand SDF: {e}")
+                        z = lig_el.detach().cpu().to(torch.long).numpy().tolist()
+                        symbols = [pt.GetElementSymbol(int(max(1, zi))) if int(zi) > 0 else 'C' for zi in z]
+                except Exception:
+                    symbols = None
+                if symbols is None:
+                    symbols = ['C'] * coords.shape[0]
+                from src.evaluation.utils_pdb_writer import build_rdkit_mol_from_coords, write_rdkit_mol_sdf
+                mol = build_rdkit_mol_from_coords(symbols, coords)
+                # If GT bonds exist, add them; else fallback to simple distance heuristic
+                try:
+                    from rdkit import Chem
+                    from rdkit.Chem import rdchem
+                    rw = Chem.RWMol(mol)
+                    if isinstance(lig_bi, torch.Tensor) and lig_bi.ndim == 2 and lig_bi.size(0) == 2 and lig_bi.numel() > 0:
+                        E = lig_bi.size(1)
+                        for k in range(E):
+                            a = int(lig_bi[0, k].item())
+                            b = int(lig_bi[1, k].item())
+                            if a == b:
+                                continue
+                            a0, b0 = (a, b) if a < b else (b, a)
+                            if rw.GetBondBetweenAtoms(a0, b0) is not None:
+                                continue
+                            btype = rdchem.BondType.SINGLE
+                            if isinstance(lig_bt, torch.Tensor) and lig_bt.numel() >= (k+1):
+                                t = int(lig_bt[k].item())
+                                if t == 2:
+                                    btype = rdchem.BondType.DOUBLE
+                                elif t == 3:
+                                    btype = rdchem.BondType.TRIPLE
+                                elif t == 4:
+                                    btype = rdchem.BondType.AROMATIC
+                            rw.AddBond(a0, b0, btype)
+                        mol = rw.GetMol()
+                    else:
+                        # heuristic bonds
+                        import numpy as np
+                        radii = {'H':0.31,'C':0.76,'N':0.71,'O':0.66,'F':0.57,'P':1.07,'S':1.05,'Cl':1.02,'Br':1.20,'I':1.39}
+                        max_deg = {'H':1,'C':4,'N':3,'O':2,'F':1,'P':5,'S':6,'Cl':1,'Br':1,'I':1}
+                        pairs = []
+                        deg = [0]*len(symbols)
+                        for i in range(len(symbols)):
+                            ri = radii.get(symbols[i], 0.8)
+                            for j in range(i+1, len(symbols)):
+                                rj = radii.get(symbols[j], 0.8)
+                                cutoff = 1.15*(ri+rj)
+                                dij = float(np.linalg.norm(coords[i]-coords[j]))
+                                if 0.1 < dij <= cutoff and deg[i] < max_deg.get(symbols[i],4) and deg[j] < max_deg.get(symbols[j],4):
+                                    pairs.append((i,j)); deg[i]+=1; deg[j]+=1
+                        for a,b in pairs:
+                            a0, b0 = (a,b) if a < b else (b,a)
+                            if rw.GetBondBetweenAtoms(a0,b0) is None:
+                                rw.AddBond(a0,b0, rdchem.BondType.SINGLE)
+                        mol = rw.GetMol()
+                    try:
+                        Chem.SanitizeMol(mol)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                ref_path = os.path.join(ref_dir, f'reference_{cnt:05d}.sdf')
+                write_rdkit_mol_sdf(mol, ref_path)
+        except Exception as e:
+            print(f"Warning: failed to write reference ligand SDF for idx {cnt}: {e}")
         # sample one per complex; advance running index for filenames
         sampler.sample_and_write(model, bb, out_dir=sdf_dir, num_samples=1, prefix='lig', use_multi_modal=True, start_idx=cnt)
         cnt += 1
@@ -811,6 +888,30 @@ def run_sample_and_eval(args):
             vis_path = os.path.join(vis_dir, 'vis_grid.png')
             img.save(vis_path)
             print(f"Saved molecule grid image to {vis_path}")
+
+        # Also visualize reference ligands grid from experiments/reference
+        try:
+            ref_dir = os.path.join('experiments', 'reference')
+            ref_mols = []
+            if os.path.isdir(ref_dir):
+                for fn in os.listdir(ref_dir):
+                    if fn.lower().endswith('.sdf'):
+                        p = os.path.join(ref_dir, fn)
+                        try:
+                            suppl = Chem.SDMolSupplier(p, removeHs=True, sanitize=True)
+                            for m in suppl:
+                                if m is not None:
+                                    ref_mols.append(m)
+                                    break
+                        except Exception:
+                            continue
+            if len(ref_mols) > 0:
+                img_ref = Draw.MolsToGridImage(ref_mols[:64], molsPerRow=8, subImgSize=(200, 200))
+                vis_ref_path = os.path.join(vis_dir, 'reference_grid.png')
+                img_ref.save(vis_ref_path)
+                print(f"Saved reference molecule grid image to {vis_ref_path}")
+        except Exception:
+            pass
 
         # 写出简要摘要
         import json

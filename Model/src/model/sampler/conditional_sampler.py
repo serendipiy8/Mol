@@ -200,6 +200,72 @@ class ConditionalSampler:
                     break
         return ei, et
 
+    @staticmethod
+    def _select_bonds_from_model(edge_index: torch.Tensor,
+                                 bond_logits: torch.Tensor,
+                                 elements: List[str],
+                                 conf_thr: float = 0.3,
+                                 topk_per_node: int = 4) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Select bonds using model logits with confidence filtering and per-node topK under valence constraints.
+
+        edge_index: [2, E] with i<j
+        bond_logits: [E, C] where class 0 denotes 'no bond' (assumed)
+        returns (edge_index_sel [2, E_sel], edge_type_sel [E_sel]) with classes in {1,2,3,4}
+        """
+        if not isinstance(edge_index, torch.Tensor) or not isinstance(bond_logits, torch.Tensor):
+            return torch.empty(2, 0, dtype=torch.long), torch.empty(0, dtype=torch.long)
+        if edge_index.numel() == 0 or bond_logits.numel() == 0:
+            return torch.empty(2, 0, dtype=torch.long), torch.empty(0, dtype=torch.long)
+
+        probs = torch.softmax(bond_logits, dim=-1)
+        conf, cls = probs.max(dim=-1)  # [E]
+
+        # keep only confident and non-zero class (assume 0 is no-bond)
+        keep = (conf >= conf_thr) & (cls > 0)
+        if keep.sum().item() == 0:
+            return torch.empty(2, 0, dtype=torch.long), torch.empty(0, dtype=torch.long)
+
+        ei = edge_index[:, keep]
+        et = cls[keep].to(torch.long)
+        sc = conf[keep].to(torch.float32)
+
+        # Greedy selection by confidence with valence constraints and per-node topK
+        max_valence = {'H': 1, 'C': 4, 'N': 3, 'O': 2, 'F': 1, 'P': 5, 'S': 6, 'Cl': 1, 'Br': 1, 'I': 1}
+        order_map = {1: 1, 2: 2, 3: 3, 4: 1}  # aromatic ~ single
+        N = len(elements)
+        deg = [0.0] * N
+        cnt = [0] * N
+        # sort edges by confidence desc
+        idx = torch.argsort(sc, descending=True)
+        sel_edges: List[Tuple[int, int]] = []
+        sel_types: List[int] = []
+        for k in idx.tolist():
+            a = int(ei[0, k].item())
+            b = int(ei[1, k].item())
+            t = int(et[k].item())
+            if a == b:
+                continue
+            wa = max_valence.get(elements[a], 4)
+            wb = max_valence.get(elements[b], 4)
+            w = float(order_map.get(t, 1))
+            # per-node topK and valence check
+            if cnt[a] >= topk_per_node or cnt[b] >= topk_per_node:
+                continue
+            if (deg[a] + w) > wa or (deg[b] + w) > wb:
+                continue
+            sel_edges.append((a, b))
+            sel_types.append(t)
+            deg[a] += w
+            deg[b] += w
+            cnt[a] += 1
+            cnt[b] += 1
+
+        if not sel_edges:
+            return torch.empty(2, 0, dtype=torch.long), torch.empty(0, dtype=torch.long)
+        ei_out = torch.tensor([[a for a, b in sel_edges], [b for a, b in sel_edges]], dtype=torch.long)
+        et_out = torch.tensor(sel_types, dtype=torch.long)
+        return ei_out, et_out
+
     @torch.no_grad()
     def _predict_tau(self, model, batch: Data, n_atoms: int) -> torch.Tensor:
         if hasattr(model, 'predict_tau_params'):
@@ -278,10 +344,21 @@ class ConditionalSampler:
             h_last = None
             if use_multi_modal:
                 tau = torch.full((n_atoms,), 0.5, device=self.device)
+                # feature dimension must match model's expected node feature dim (training-time),
+                # prefer qphi_feat_proj.in_features if available; fallback to input_proj in_features minus s/t dims
+                try:
+                    if hasattr(model, 'qphi_feat_proj') and hasattr(model.qphi_feat_proj, 'in_features'):
+                        feat_dim = int(model.qphi_feat_proj.in_features)
+                    else:
+                        feat_dim = int(getattr(model, 'input_proj').in_features) - 1 - int(getattr(model, 'time_dim', 0))
+                        if feat_dim <= 0:
+                            feat_dim = 64
+                except Exception:
+                    feat_dim = 64
                 x0, h_last = self.diffusion_process.sample_multi_modal(
                     model=model,
                     shape_coord=(n_atoms, 3),
-                    shape_feat=(n_atoms, getattr(model, 'hidden_dim', 64)),
+                    shape_feat=(n_atoms, feat_dim),
                     tau=tau,
                     soft_mask_transform=self.soft_mask_transform,
                     batch_context=batch,
@@ -309,11 +386,20 @@ class ConditionalSampler:
                 pass
             print(f"DEBUG sample_and_write -> sample {i} coords shape:", coords.shape)
 
-            if use_multi_modal and h_last is not None and hasattr(model, 'atom_type_head'):
-                logits = model.atom_type_head(h_last.to(self.device))
-                print("DEBUG sample_and_write -> atom_type_head logits shape:", logits.shape)
-                if logits.size(0) != n_atoms:
-                    print("WARNING: logits batch size does not match n_atoms")
+            if use_multi_modal and hasattr(model, 'atom_type_head'):
+                logits = getattr(batch, 'pred_atom_type_logits', None)
+                if not isinstance(logits, torch.Tensor) and h_last is not None:
+                    # fallback: only call head if feature dim matches hidden_dim
+                    try:
+                        hid = int(getattr(model, 'hidden_dim', 0))
+                        if hid > 0 and h_last.size(-1) == hid:
+                            logits = model.atom_type_head(h_last.to(self.device))
+                    except Exception:
+                        logits = None
+                if isinstance(logits, torch.Tensor):
+                    print("DEBUG sample_and_write -> atom_type_head logits shape:", logits.shape)
+                    if logits.size(0) != n_atoms:
+                        print("WARNING: logits batch size does not match n_atoms")
                 # confidence-gated replacement to avoid collapse to a single class
                 with torch.no_grad():
                     probs = torch.softmax(logits, dim=-1)
@@ -329,42 +415,128 @@ class ConditionalSampler:
                             elements_gate.append(elements[ii])
                     elements = elements_gate
 
-            # Build RDKit Mol from coords, then add reasonable bonds by distance/valence heuristics
+            # Build RDKit Mol from coords
             from rdkit import Chem
             mol = build_rdkit_mol_from_coords(elements, coords)
-            # Guess bonds
+            # Prefer model-predicted bonds with minimal filtering; fallback to geometry if too few
+            added_bonds = False
             try:
-                ei = self._guess_bonds_by_distance(elements, coords, scale=1.15)
+                edge_index_pred = getattr(batch, 'pred_bond_index', None)
+                bond_logits_pred = getattr(batch, 'pred_bond_logits', None)
+                if isinstance(edge_index_pred, torch.Tensor) and isinstance(bond_logits_pred, torch.Tensor) \
+                   and edge_index_pred.numel() > 0 and bond_logits_pred.numel() > 0:
+                    cls = bond_logits_pred.argmax(dim=-1).to(torch.long)
+                    keep = (cls > 0)
+                    if keep.any():
+                        ei = edge_index_pred[:, keep]
+                        et = cls[keep]
+                        # prune by valence for safety
+                        ei, et = self._prune_by_valence(ei, et, elements)
+                        from rdkit.Chem import rdchem
+                        rw = Chem.RWMol(mol)
+                        E = int(ei.size(1))
+                        for k in range(E):
+                            a = int(ei[0, k].item())
+                            b = int(ei[1, k].item())
+                            if a == b:
+                                continue
+                            if a > b:
+                                a, b = b, a
+                            if a < 0 or b < 0 or a >= rw.GetNumAtoms() or b >= rw.GetNumAtoms():
+                                continue
+                            if rw.GetBondBetweenAtoms(a, b) is not None:
+                                continue
+                            bt = int(et[k].item())
+                            btype = rdchem.BondType.SINGLE
+                            if bt == 2:
+                                btype = rdchem.BondType.DOUBLE
+                            elif bt == 3:
+                                btype = rdchem.BondType.TRIPLE
+                            elif bt == 4:
+                                btype = rdchem.BondType.AROMATIC
+                            try:
+                                rw.AddBond(a, b, btype)
+                            except Exception:
+                                continue
+                        mol = rw.GetMol()
+                        added_bonds = True
             except Exception:
-                ei = None
-            if isinstance(ei, torch.Tensor) and ei.numel() > 0 and ei.size(0) == 2:
+                added_bonds = False
+
+            if not added_bonds:
+                # Heuristic fallback: guess by distance (scale=1.15), prune by valence, add SINGLE bonds
                 try:
-                    edge_index = ei
-                    edge_type = torch.ones(edge_index.size(1), dtype=torch.long)
-                    # prune by simple valence constraints
-                    edge_index, edge_type = self._prune_by_valence(edge_index, edge_type, elements)
-                    # add SINGLE bonds to mol
-                    from rdkit.Chem import rdchem
+                    ei = self._guess_bonds_by_distance(elements, coords, scale=1.15)
+                except Exception:
+                    ei = None
+                if isinstance(ei, torch.Tensor) and ei.numel() > 0 and ei.size(0) == 2:
+                    try:
+                        edge_index = ei
+                        edge_type = torch.ones(edge_index.size(1), dtype=torch.long)
+                        edge_index, edge_type = self._prune_by_valence(edge_index, edge_type, elements)
+                        from rdkit.Chem import rdchem
+                        rw = Chem.RWMol(mol)
+                        E = edge_index.size(1)
+                        for k in range(E):
+                            a = int(edge_index[0, k].item())
+                            b = int(edge_index[1, k].item())
+                            if a == b:
+                                continue
+                            if a > b:
+                                a, b = b, a
+                            if a < 0 or b < 0 or a >= rw.GetNumAtoms() or b >= rw.GetNumAtoms():
+                                continue
+                            if rw.GetBondBetweenAtoms(a, b) is not None:
+                                continue
+                            try:
+                                rw.AddBond(a, b, rdchem.BondType.SINGLE)
+                            except Exception:
+                                continue
+                        mol = rw.GetMol()
+                        added_bonds = True
+                    except Exception:
+                        added_bonds = False
+
+            # Enforce single connected component and try to sanitize (aromaticity/double-bond perception)
+            try:
+                # Try full sanitize to enable aromaticity and bond order perception
+                try:
+                    Chem.SanitizeMol(mol)
+                except Exception:
+                    try:
+                        Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_PROPERTIES | Chem.SanitizeFlags.SANITIZE_SYMMRINGS)
+                    except Exception:
+                        pass
+                frags = Chem.GetMolFrags(mol)
+                if isinstance(frags, tuple) and len(frags) > 1:
+                    # choose fragment with max heavy atoms
+                    def heavy_count(ids):
+                        cnt = 0
+                        for idx in ids:
+                            atm = mol.GetAtomWithIdx(int(idx))
+                            if atm.GetAtomicNum() > 1:
+                                cnt += 1
+                        return cnt
+                    sizes = [heavy_count(f) for f in frags]
+                    keep_i = int(max(range(len(sizes)), key=lambda ii: sizes[ii]))
+                    keep_set = set(int(x) for x in frags[keep_i])
                     rw = Chem.RWMol(mol)
-                    E = edge_index.size(1)
-                    for k in range(E):
-                        a = int(edge_index[0, k].item())
-                        b = int(edge_index[1, k].item())
-                        if a == b:
-                            continue
-                        if a > b:
-                            a, b = b, a
-                        if a < 0 or b < 0 or a >= rw.GetNumAtoms() or b >= rw.GetNumAtoms():
-                            continue
-                        if rw.GetBondBetweenAtoms(a, b) is not None:
-                            continue
+                    # remove atoms NOT in keep_set, descending order to keep indices valid
+                    to_remove = [i for i in range(rw.GetNumAtoms()) if i not in keep_set]
+                    to_remove.sort(reverse=True)
+                    for idx in to_remove:
                         try:
-                            rw.AddBond(a, b, rdchem.BondType.SINGLE)
+                            rw.RemoveAtom(int(idx))
                         except Exception:
                             continue
                     mol = rw.GetMol()
+                # Final sanitize pass (best-effort)
+                try:
+                    Chem.SanitizeMol(mol)
                 except Exception:
                     pass
+            except Exception:
+                pass
             sdf_path = os.path.join(out_dir, f"{prefix}_{(start_idx + i):05d}.sdf")
             try:
                 Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_PROPERTIES | Chem.SanitizeFlags.SANITIZE_SYMMRINGS)

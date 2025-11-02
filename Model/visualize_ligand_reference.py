@@ -28,7 +28,7 @@ def load_first_mol(sdf_path: str):
 
 def main():
     parser = argparse.ArgumentParser(description='Visualize ligand SDF: output SMILES and PNG')
-    parser.add_argument('--sdf', type=str, default='experiments/outputs/main/samples_conditional/lig_00000.sdf', help='input SDF path')
+    parser.add_argument('--sdf', type=str, default='experiments/outputs/main/samples_conditional/lig_00090.sdf', help='input SDF path')
     parser.add_argument('--out_png', type=str, default='experiments/reference/reference_vis_00000.png', help='output PNG path')
     args = parser.parse_args()
 

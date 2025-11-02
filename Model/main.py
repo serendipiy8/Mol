@@ -19,7 +19,7 @@ from src.training.runner import run_train, run_sample_and_eval, run_sample_condi
 def main():
     # input and output
     parser = argparse.ArgumentParser(description='Main Runner')
-    parser.add_argument('--mode', type=str, default='train', choices=['train', 'sample', 'train_and_sample', 'sample_conditional', 'sample_de_novo'])
+    parser.add_argument('--mode', type=str, default='sample', choices=['train', 'sample', 'train_and_sample', 'sample_conditional', 'sample_de_novo'])
     parser.add_argument('--dataset_path', type=str, default='src/data/crossdocked_v1.1_rmsd1.0_processed')
     parser.add_argument('--split_file', type=str, default='src/data/split_by_name.pt')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
@@ -54,13 +54,13 @@ def main():
     parser.add_argument('--protein_encoder_se3', action='store_true', default=False)
 
     # trainer
-    parser.add_argument('--num_epochs', type=int, default=20)
+    parser.add_argument('--num_epochs', type=int, default=500)
     parser.add_argument('--train_fraction', type=float, default=1.0)
-    parser.add_argument('--train_limit', type=int, default=10)
+    parser.add_argument('--train_limit', type=int, default=1)
     parser.add_argument('--test_limit', type=int, default=0)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--aggregate_all_t', action='store_true', default=False)
-    parser.add_argument('--graph_tau_repeats', type=int, default=1)
+    parser.add_argument('--graph_tau_repeats', type=int, default=5)
     parser.add_argument('--log_interval', type=int, default=1)
     parser.add_argument('--lambda_tau_smooth', type=float, default=0.0)
     parser.add_argument('--lambda_tau_rank', type=float, default=0.0)
@@ -75,11 +75,11 @@ def main():
     parser.add_argument('--sigma_schedule', type=str, default='linear')
     parser.add_argument('--debug_atom_type', action='store_true', default=True)
     parser.add_argument('--normalize_coord_loss', action='store_true', default=True,)
-    parser.add_argument('--coord_use_kabsch', action='store_true', default=True)
+    parser.add_argument('--coord_use_kabsch', action='store_true', default=False)
     parser.add_argument('--tau_as_t', action='store_true', default=False)
     parser.add_argument('--kappa', type=float, default=5.0)
     parser.add_argument('--tau_window', type=int, default=100)
-    parser.add_argument('--fix_tau_per_graph', action='store_true', default=False)
+    parser.add_argument('--fix_tau_per_graph', action='store_true', default=True)
     # graph-mode inner training loop
     parser.add_argument('--graph_mode', action='store_true', default=True)
     parser.add_argument('--graph_inner_epochs', type=int, default=5)

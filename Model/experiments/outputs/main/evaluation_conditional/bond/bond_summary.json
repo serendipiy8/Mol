@@ -1,15 +1,15 @@
 {
-  "single": 3069,
+  "single": 62,
   "double": 0,
   "triple": 0,
   "aromatic": 0,
   "other": 0,
-  "ring_bonds": 2672,
-  "total_bonds": 3069,
+  "ring_bonds": 50,
+  "total_bonds": 62,
   "sanitize_fail": 0,
   "num_molecules": 100,
-  "avg_bonds_per_mol": 30.69,
+  "avg_bonds_per_mol": 0.62,
   "aromatic_ratio": 0.0,
-  "ring_bond_ratio": 0.8706419028999675,
+  "ring_bond_ratio": 0.8064516129032258,
   "sanitize_fail_rate": 0.0
 }

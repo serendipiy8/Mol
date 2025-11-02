@@ -22,7 +22,8 @@ class DiffusionTrainer:
                  lambda_bond: float = 0.1,
                  debug_atom_type: bool = False,
                  normalize_coord_loss: bool = False, coord_use_kabsch: bool = True, coord_debug: bool = False, tau_as_t: bool = False, kappa: float = 5.0,
-                 tau_window: int = 100, fix_tau_per_graph: bool = False):
+                 tau_window: int = 100, fix_tau_per_graph: bool = False,
+                 tau_rank_normalize: bool = False):
 
         self.diffusion_process = diffusion_process
         self.loss_fn = loss_fn
@@ -53,6 +54,7 @@ class DiffusionTrainer:
         self.current_epoch = 0
         self.fix_tau_per_graph = bool(fix_tau_per_graph)
         self.tau_cache = {}
+        self.tau_rank_normalize = bool(tau_rank_normalize)
 
     def set_epoch(self, epoch_idx: int) -> None:
         self.current_epoch = int(epoch_idx)
@@ -418,7 +420,6 @@ class DiffusionTrainer:
             tau_mu, tau_log_sigma = tau_params
             tau_mu = tau_mu.to(self.device)
             tau_log_sigma = tau_log_sigma.to(self.device)
-            # 固定每图 tau（跨多个 epoch 下降），可选（优先使用全局缓存，其次 batch 局部）
             graph_id = getattr(batch, 'graph_id', None)
             if graph_id is None:
                 graph_id = getattr(batch, '_graph_id', None)
@@ -448,6 +449,20 @@ class DiffusionTrainer:
             else:
                 tau = torch.full((x0.size(0),), 0.5, device=self.device)
         batch.tau = tau
+
+        # Optional: per-graph rank normalization of tau into (0,1) to enforce order-only semantics
+        if self.tau_rank_normalize and isinstance(batch.tau, torch.Tensor) and batch.tau.dim() == 1 and batch.tau.size(0) == x0.size(0):
+            try:
+                vals = batch.tau
+                # ranks in [0, N-1]
+                sorted_vals, sorted_idx = torch.sort(vals)
+                ranks = torch.empty_like(sorted_idx, dtype=torch.long)
+                ranks[sorted_idx] = torch.arange(vals.numel(), device=vals.device)
+                vals_norm = (ranks.to(torch.float32) + 0.5) / float(max(1, vals.numel()))
+                batch.tau = vals_norm.to(vals.dtype)
+                tau = batch.tau
+            except Exception:
+                pass
 
         # 编码上下文
         self._encode_context(batch)
@@ -511,7 +526,7 @@ class DiffusionTrainer:
                 self._assert_shapes_post_coord(x_t, s_t, x0)
                 self._assert_shapes_post_multi(h0, h_t, s_t, x0)
 
-                # 强制 s_t 重新计算
+
                 try:
                     alpha = (t.to(torch.float32) / float(max(1, self.diffusion_process.num_steps - 1)))
                     sigma_t = self.diffusion_process.get_sigma_t(t)
@@ -530,6 +545,14 @@ class DiffusionTrainer:
                 else:
                     x0_pred, h0_pred = model_out, None
                 self._assert_model_outputs(x0_pred, x0, h0_pred, h0)
+                try:
+                    self._dbg_last_x0 = x0.detach().cpu()
+                    self._dbg_last_xt = x_t.detach().cpu()
+                    self._dbg_last_xpred = x0_pred.detach().cpu()
+                    self._dbg_last_s_t = s_t.detach().cpu()
+                    self._dbg_last_tau = tau.detach().cpu()
+                except Exception:
+                    pass
 
             else:
                 _old_prot = getattr(batch, 'protein_pos', None)
@@ -564,8 +587,16 @@ class DiffusionTrainer:
 
                 x0_pred = _call_model(model, x_t, s_t, t, batch_ctx=batch)
                 self._assert_model_outputs(x0_pred, x0)
+                try:
+                    self._dbg_last_x0 = x0.detach().cpu()
+                    self._dbg_last_xt = x_t.detach().cpu()
+                    self._dbg_last_xpred = x0_pred.detach().cpu()
+                    self._dbg_last_s_t = s_t.detach().cpu()
+                    self._dbg_last_tau = tau.detach().cpu()
+                except Exception:
+                    pass
 
-            # 计算 loss
+            # 计算 loss（标准化残差监督）：r = (x0 - x_t) / sigma
             sigma_coord = self.diffusion_process.sigmas[t]
             sigma_feat = self.diffusion_process.sigmas[t] if has_feat else sigma_coord
 
@@ -576,32 +607,17 @@ class DiffusionTrainer:
                     return (x_gt - mu_g) / std_g, (x_pr - mu_g) / std_g
                 return x_gt, x_pr
 
+            # 目标：标准化残差 r_true = (x0 - x_t)/sigma，预测 r_pred = (x0_pred - x_t)/sigma
+            # 注意：x_t 与 x0 同中心化坐标系，不使用 Kabsch 以免引入不稳定旋转
             x0_use, x0_pred_use = _maybe_norm(x0, x0_pred)
-            # Optional Kabsch alignment (remove global rotation)
-            if self.coord_use_kabsch:
-                try:
-                    X = x0_use
-                    Y = x0_pred_use
-                    Xc = X - X.mean(dim=0, keepdim=True)
-                    Yc = Y - Y.mean(dim=0, keepdim=True)
-                    H = Yc.transpose(0, 1) @ Xc  # align Y -> X
-                    U, S, Vt = torch.linalg.svd(H)
-                    R = Vt.transpose(0, 1) @ U.transpose(0, 1)
-                    if torch.det(R) < 0:
-                        Vt2 = Vt.clone()
-                        Vt2[-1, :] = -Vt2[-1, :]
-                        R = Vt2.transpose(0, 1) @ U.transpose(0, 1)
-                    Yc_aligned = Yc @ R
-                    x0_pred_use = Yc_aligned
-                    x0_use = Xc
-                except Exception:
-                    pass
+            r_true = (x0_use - x_t) / (sigma_coord.unsqueeze(-1) + 1e-8)
+            r_pred = (x0_pred_use - x_t) / (sigma_coord.unsqueeze(-1) + 1e-8)
             if has_feat and h0_pred is not None:
-                coord_loss_val = self.loss_fn.compute_loss(x0_use, x0_pred_use, s_t, sigma_coord)
+                coord_loss_val = self.loss_fn.compute_loss(r_true, r_pred, s_t, sigma_coord.new_ones(sigma_coord.shape))
                 feat_loss_val = self.loss_fn.compute_loss(h0, h0_pred, s_t, sigma_feat)
                 diffusion_loss = coord_loss_val + self.lambda_feat * feat_loss_val
             else:
-                coord_loss_val = self.loss_fn.compute_loss(x0_use, x0_pred_use, s_t, sigma_coord)
+                coord_loss_val = self.loss_fn.compute_loss(r_true, r_pred, s_t, sigma_coord.new_ones(sigma_coord.shape))
                 feat_loss_val = torch.tensor(0.0, device=self.device)
                 diffusion_loss = coord_loss_val
 

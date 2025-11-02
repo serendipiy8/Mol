@@ -58,7 +58,8 @@ def build_model_and_trainer(args, node_dim: int, device: torch.device):
         sigma_schedule='linear',
         device=str(device)
     )
-    loss_fn = DiffusionLoss(loss_type='mse', reweighting=True, w_max=20)
+    # 稳定训练：启用 σ-only 重加权（在 DiffusionLoss 内实现）
+    loss_fn = DiffusionLoss(loss_type='mse', reweighting=True, w_max=100)
     base_lr = float(getattr(args, 'lr', 3e-4))
     coord_params = []
     feat_params = []
@@ -75,8 +76,8 @@ def build_model_and_trainer(args, node_dim: int, device: torch.device):
     # revert coord head to base lr for stability; can tune later
     optimizer = torch.optim.Adam([
         { 'params': base_params, 'lr': base_lr },
-        { 'params': coord_params, 'lr': base_lr * 4.0 },
-        { 'params': feat_params,  'lr': base_lr * 2.0 },
+        { 'params': coord_params, 'lr': base_lr * 1.0 },
+        { 'params': feat_params,  'lr': base_lr * 1.0 },
     ])
     # If coord_debug is enabled, force single-step aggregation for detailed prints
     agg_all = bool(args.aggregate_all_t)
@@ -102,11 +103,13 @@ def build_model_and_trainer(args, node_dim: int, device: torch.device):
         lambda_bond=float(getattr(args, 'lambda_bond', 0.5)),
         debug_atom_type=bool(getattr(args, 'debug_atom_type', True)),
         normalize_coord_loss=bool(getattr(args, 'normalize_coord_loss', True)),
-        coord_use_kabsch=bool(getattr(args, 'coord_use_kabsch', True)),
+        # 默认关闭 Kabsch 提升稳定性；需要时可在参数中打开
+        coord_use_kabsch=bool(getattr(args, 'coord_use_kabsch', False)),
         coord_debug=bool(getattr(args, 'coord_debug', False)),
         tau_as_t=bool(getattr(args, 'tau_as_t', False)),
         kappa=float(getattr(args, 'kappa', 5.0)),
         tau_window=int(getattr(args, 'tau_window', 100)),
         fix_tau_per_graph=bool(getattr(args, 'fix_tau_per_graph', True)),
+        tau_rank_normalize=bool(getattr(args, 'tau_rank_normalize', True)),
     )
     return model, trainer, diffusion

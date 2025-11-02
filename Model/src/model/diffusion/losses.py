@@ -28,10 +28,9 @@ class DiffusionLoss:
         base_loss = base_loss.mean(dim=-1) 
 
         if self.reweighting:
+             # 稳定重加权：仅按 σ 缩放，降低步间方差
             sigma_safe = torch.clamp(sigma_t, min=1e-4)
-            # 反向加权：强调小 s（低 SNR）区域
-            s_safe = torch.clamp(1-s_t, min=1e-4)
-            weights = -1.0 / (s_safe ** 2 * sigma_safe ** 2 + self.eps)
+            weights = 1.0 / (sigma_safe ** 2 + self.eps)
             weights = torch.clamp(weights, max=self.w_max)
             weights = weights / (weights.mean() + self.eps)
             base_loss = base_loss * weights

@@ -1,6 +1,6 @@
 Metric,Value,Description
 Validity Rate,1.000,100/100 molecules are chemically valid
-Uniqueness Rate,1.000,100/100 molecules are unique
+Uniqueness Rate,0.550,55/100 molecules are unique
 Novelty Rate,1.000,100/100 molecules are novel
-Scaffold Diversity,0.980,98/100 unique scaffolds
-Functional Groups,6,6 different functional groups detected
+Scaffold Diversity,0.080,8/100 unique scaffolds
+Functional Groups,3,3 different functional groups detected
